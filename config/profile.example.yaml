@@ -18,9 +18,10 @@
 version: 1
 
 # --- Who the candidate is ---------------------------------------------------
-# Never printed in logs, reports or CI artifacts.
+# Never printed in logs, reports or CI artifacts. Keep personal details in the
+# git-ignored config/profile.yaml, never in this committed template.
 candidate:
-  name: "Example Candidate"
+  name: null
   contact_email: null
   headline: null
 
@@ -36,17 +37,32 @@ work_authorization: null           # e.g. "citizen", "sponsorship-required"
 # --- Skills -----------------------------------------------------------------
 # proficiency: beginner | intermediate | advanced | expert | null
 # years: number | null            last_used: "YYYY-MM" | null
+#
+# These are the operator's confirmed technical skills. proficiency, years and
+# last_used are deliberately left null: schemahawk never estimates them.
+# Matching tolerates the usual short forms, so "Azure Data Factory (ADF)" also
+# matches a posting that says only "ADF" (see textmatch.skill_fragments).
 skills:
   - name: "SQL"
-    category: null                # e.g. "database", "cloud", "bi", "orchestration"
-    proficiency: null
-    years: null
-    last_used: null
+  - name: "Azure SQL"
   - name: "Python"
-    category: null
-    proficiency: null
-    years: null
-    last_used: null
+  - name: "Azure Data Factory (ADF)"
+  - name: "Databricks"
+  - name: "Snowflake"
+  - name: "Google BigQuery"
+  - name: "Alteryx Designer"
+  - name: "Tableau Desktop"
+  - name: "Tableau Server"
+  - name: "Power BI"
+  - name: "Power Query"
+  - name: "DAX"
+  - name: "ETL / ELT"
+  - name: "REST APIs"
+  - name: "Jira REST API"
+  - name: "Data extraction and transformation"
+  - name: "Data quality / QA"
+  - name: "Dashboard development"
+  - name: "GitHub"
 
 # --- History (optional, never reported) -------------------------------------
 employment_history: []             # [{company, title, start, end, summary}]

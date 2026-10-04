@@ -40,7 +40,6 @@ SKILL_ALIASES: dict[str, tuple[str, ...]] = {
     "alteryx designer": ("alteryx",),
     "power bi": ("powerbi",),
     "tableau desktop": ("tableau",),
-    "tableau server": ("tableau server",),
     "rest apis": ("rest api",),
     "jira rest api": ("jira api", "jira rest api"),
     "etl / elt": ("etl", "elt"),

@@ -13,8 +13,38 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .models import FreshnessStatus, Job
+from .matching import UNKNOWN, MatchResult
 
 _STAMP = "%Y-%m-%d %H:%M UTC"
+
+_UNKNOWN = UNKNOWN
+
+
+def _score(value: int | None) -> str:
+    """Render an unknown component as UNKNOWN rather than a misleading number."""
+    return _UNKNOWN if value is None else str(value)
+
+
+def _render_match(job: Job, match: MatchResult) -> list[str]:
+    """One candidate-match block.
+
+    The two scores are reported side by side and never merged: the V1 relevance
+    score says the listing is a relevant Data Engineering job, while the
+    candidate match score says how well it fits this profile. Unknown
+    components print as UNKNOWN instead of a number.
+    """
+    relevance = job.relevance_score if job.relevance_score is not None else "-"
+    lines = [
+        f"- {job.title or '(untitled)'} @ {job.company or 'unknown company'}",
+        f"    Technical: {_score(match.technical_score)} | "
+        f"Experience: {_score(match.experience_score)} | "
+        f"Contract/location: {_score(match.contract_score)} | "
+        f"Eligibility: {_score(match.eligibility_score)}",
+        f"    Candidate Match Score: {_score(match.overall_score)} | "
+        f"V1 Relevance Score: {relevance}",
+    ]
+    lines += [f"    {line}" for line in match.explanation]
+    return lines
 
 
 def _fmt(moment: datetime | None) -> str:
@@ -50,6 +80,7 @@ class RunReport:
 
     strong_candidates: int = 0
     strong: list[Job] = field(default_factory=list)
+    matches: list[tuple[Job, MatchResult]] = field(default_factory=list)
 
     stored_inserted: int = 0
     stored_updated: int = 0
@@ -127,6 +158,11 @@ class RunReport:
                 )
                 if job.url:
                     lines.append(f"    {job.url}")
+
+        if self.matches:
+            lines += ["", "Overall candidate match:"]
+            for job, match in self.matches:
+                lines += _render_match(job, match)
 
         return "\n".join(lines) + "\n"
 

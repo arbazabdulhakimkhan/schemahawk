@@ -28,7 +28,9 @@ from .models import (
     PipelineStatus,
     QualityStatus,
 )
+from .matching import match_job
 from .normalize import attach_keys, clean_text
+from .profile import CandidateProfile, profile_from_settings
 from .quality import classify
 from .relevance import score_relevance
 from .report import RunReport
@@ -50,6 +52,7 @@ def run_discovery(
     store: Store | None = None,
     known_keys: dict[str, set] | None = None,
     now: datetime | None = None,
+    profile: CandidateProfile | None = None,
 ) -> RunReport:
     """Run the full V1 discovery pipeline and return a :class:`RunReport`."""
     now = now or datetime.now(timezone.utc)
@@ -64,7 +67,8 @@ def run_discovery(
     try:
         report = _discover(settings, report, store, now=now, only_source=only_source,
                            force=force, since_minutes=since_minutes,
-                           threshold=threshold, known_keys=known_keys)
+                           threshold=threshold, known_keys=known_keys,
+                           profile=profile)
     finally:
         if owned_store:
             store.close()
@@ -72,8 +76,14 @@ def run_discovery(
 
 
 def _discover(settings, report, store, *, now, only_source, force, since_minutes,
-              threshold, known_keys) -> RunReport:
-    """Inner pipeline body: keeps ``run_discovery`` focused on store lifetime."""
+              threshold, known_keys, profile=None) -> RunReport:
+    """Inner pipeline body: keeps ``run_discovery`` focused on store lifetime.
+
+    ``profile`` is optional: when it is not supplied the candidate-match layer
+    is skipped entirely and the run behaves exactly as V1 did.
+    """
+    if profile is None:
+        profile = profile_from_settings(settings)
     sources, notes = build_sources(settings, only=only_source)
     for name, note in notes:
         report.note(name, note)
@@ -128,6 +138,11 @@ def _discover(settings, report, store, *, now, only_source, force, since_minutes
     strong.sort(key=_strong_sort_key)
     report.strong = strong[:MAX_STRONG_IN_REPORT]
     report.strong_candidates = len(strong)
+
+    # Candidate matching is additive and always runs on the strong candidates
+    # only. It never alters relevance_score, quality or status, and an empty
+    # profile simply yields UNKNOWN components instead of numbers.
+    report.matches = [(job, match_job(job, profile)) for job in strong]
 
     report.stored_inserted, report.stored_updated = store.upsert_jobs(unique)
     report.completed_at = datetime.now(timezone.utc)

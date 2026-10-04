@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from schemahawk import pipeline
 from schemahawk.models import PipelineStatus
+from schemahawk.profile import default_profile, parse_profile
 from schemahawk.store import Store
 
 from conftest import NOW, FakeSource, make_job
@@ -197,3 +198,96 @@ def test_source_note_is_recorded_for_skipped_poll(settings):
     assert report.source_failures == []
     assert any("skipped this hour" in note for _, note in report.source_notes)
 
+
+# --- candidate matching wiring ---------------------------------------------
+#
+# The match layer is additive: it must never change V1 counters, statuses or
+# the report sections V1 already guaranteed.
+
+MATCH_JD = ("You have strong experience with Python and SQL. "
+            "Required: Snowflake. Nice to have: Tableau. "
+            "5+ years of experience. Remote worldwide.")
+
+
+def test_pipeline_populates_match_results(settings):
+    jobs = [make_job(url="https://e.com/m1", source_job_id="m1", minutes_old=5,
+                     title="Senior Data Engineer", description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None), jobs,
+                     profile=parse_profile({
+                         "skills": ["SQL", "Python", "Snowflake"],
+                         "total_years_experience": 8,
+                         "seniority": "senior",
+                     }))
+    assert report.strong_candidates == 1
+    assert len(report.matches) == 1
+    match = report.matches[0][1]
+    assert match.technical_score is not None
+    assert match.overall_score is not None
+
+
+def test_match_results_do_not_change_v1_counters(settings):
+    """Adding the match layer must leave every V1 number exactly as it was."""
+    jobs = [make_job(url="https://e.com/m2", source_job_id="m2", minutes_old=5,
+                     description=MATCH_JD)]
+    with_profile, _ = _run(replace(settings, db_path=None), jobs,
+                           profile=parse_profile({"skills": ["SQL"]}))
+    without, _ = _run(replace(settings, db_path=None), jobs,
+                      profile=default_profile())
+    assert with_profile.discovered == without.discovered
+    assert with_profile.strong_candidates == without.strong_candidates
+    assert with_profile.duplicates_removed == without.duplicates_removed
+    assert with_profile.rejected_non_de == without.rejected_non_de
+
+
+def test_v1_relevance_score_is_untouched_by_matching(settings):
+    jobs = [make_job(url="https://e.com/m3", source_job_id="m3", minutes_old=5,
+                     description=MATCH_JD)]
+    report, store = _run(replace(settings, db_path=None), jobs,
+                         profile=parse_profile({"skills": ["SQL"]}))
+    stored = store.conn.execute("SELECT relevance_score FROM jobs").fetchone()[0]
+    assert stored == report.matches[0][0].relevance_score
+
+
+def test_report_renders_both_scores_separately(settings):
+    jobs = [make_job(url="https://e.com/m4", source_job_id="m4", minutes_old=5,
+                     description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None), jobs,
+                     profile=parse_profile({"skills": ["SQL", "Python"]}))
+    text = report.render()
+    assert "Overall candidate match:" in text
+    assert "Candidate Match Score:" in text
+    assert "V1 Relevance Score:" in text
+    assert "Technical:" in text and "Eligibility:" in text
+
+
+def test_report_prints_unknown_for_unspecified_profile(settings):
+    """An empty profile must render UNKNOWN, not a fake zero."""
+    jobs = [make_job(url="https://e.com/m5", source_job_id="m5", minutes_old=5,
+                     description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None), jobs,
+                     profile=default_profile())
+    block = "\n".join(report.render().splitlines()[-8:])
+    assert "Candidate Match Score: UNKNOWN" in block
+    assert "Technical: UNKNOWN" in block
+
+
+def test_v1_report_sections_survive_the_match_layer(settings):
+    jobs = [make_job(url="https://e.com/m6", source_job_id="m6", minutes_old=5,
+                     description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None), jobs,
+                     profile=parse_profile({"skills": ["SQL"]}))
+    text = report.render()
+    for expected in ("SchemaHawk - Discovery Run", "Discovered:", "Fresh <=60m:",
+                     "Duplicates removed:", "Rejected:", "Strong candidates:",
+                     "Top candidates:"):
+        assert expected in text
+
+
+def test_matching_never_marks_a_job_strong_by_itself(settings):
+    """A perfect profile match must not promote an irrelevant listing."""
+    jobs = [make_job(url="https://e.com/m7", source_job_id="m7", minutes_old=5,
+                     title="Graphic Designer", description="Photoshop.")]
+    report, _ = _run(replace(settings, db_path=None), jobs,
+                     profile=parse_profile({"skills": ["Photoshop"]}))
+    assert report.strong_candidates == 0
+    assert report.matches == []
