@@ -389,7 +389,11 @@ def _score_seniority(job_seniority: str | None, profile_seniority: str | None) -
 
 
 def _score_contract(req: JobRequirements, profile: CandidateProfile) -> tuple[int | None, str]:
-    """Contract type / remote / location fit, or ``None`` when unknowable."""
+    """Contract type / remote / location fit, or ``None`` when unknowable.
+
+    Each sub-check is added only when *both* sides actually state something, so
+    an unstated preference or an unstated job location never counts as a pass.
+    """
     checks: list[bool] = []
 
     if profile.preferred_contract_types and req.contract_types:
@@ -407,10 +411,38 @@ def _score_contract(req: JobRequirements, profile: CandidateProfile) -> tuple[in
         elif wanted == "hybrid":
             checks.append(got in ("hybrid", "remote"))
 
+    if profile.preferred_locations and req.location_restriction:
+        checks.append(_location_acceptable(req.location_restriction,
+                                           profile.preferred_locations))
+
     if not checks:
         return None, UNKNOWN
     score = round(100 * sum(1 for ok in checks if ok) / len(checks))
     return score, (FIT if score == 100 else MISMATCH)
+
+
+def _location_acceptable(job_location: str,
+                         preferred: tuple[str, ...]) -> bool:
+    """True when the posting's location satisfies the candidate's preferences.
+
+    Deliberately conservative:
+
+    - A worldwide / anywhere posting satisfies any preference explicitly, since
+      the employer has stated they hire beyond their own country.
+    - Otherwise the posting location must appear among the preferred locations.
+      Matching is case-insensitive *substring* on the written text only.
+    - No geographic inference is performed: "Europe" does not imply "Germany",
+      and "EMEA" is not expanded into country lists. A posting we cannot place
+      against the preference is treated as a mismatch rather than a pass.
+    """
+    location = job_location.strip().lower()
+    if not location:
+        return False
+    if any(word in location for word in ("worldwide", "anywhere", "global")):
+        return True
+    return any(want.strip().lower() in location for want in preferred if want.strip())
+
+
 # --- public entry point -----------------------------------------------------
 
 def match_job(job: Job, profile: CandidateProfile) -> MatchResult:

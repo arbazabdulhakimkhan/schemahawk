@@ -278,6 +278,149 @@ def test_extract_required_and_preferred_skills():
     assert "Tableau Desktop" in reqs.preferred_skills
 
 
+# --- experience boundary conditions ----------------------------------------
+
+
+@pytest.mark.parametrize("years,required,score,gap", [
+    (5, "5+ years required", 100, 0),      # exactly meets
+    (20, "5+ years required", 100, 0),     # far above
+    (2, "5+ years required", 40, 3),       # slightly below
+    (1, "10+ years required", 0, 9),       # significantly below
+])
+def test_experience_scoring_boundaries(years, required, score, gap):
+    result = match_job(job(description=required),
+                       profile(skills=["Python"], total_years_experience=years))
+    assert result.experience_score == score
+    assert result.experience_gap_years == gap
+    assert result.experience_match == ("NO_GAP" if gap == 0 else "BELOW")
+
+
+def test_slightly_below_requirement_is_partial_not_zero():
+    """A 3-year gap must still leave partial credit, not a zero."""
+    result = match_job(job(description="5+ years required."),
+                       profile(skills=["Python"], total_years_experience=2))
+    assert result.experience_score == 40
+    assert result.experience_score > 0
+
+
+def test_significantly_below_requirement_floors_at_zero():
+    result = match_job(job(description="10+ years required."),
+                       profile(skills=["Python"], total_years_experience=1))
+    assert result.experience_score == 0
+
+
+def test_explanation_states_the_actual_gap():
+    result = match_job(job(description="5+ years required."),
+                       profile(skills=["Python"], total_years_experience=2))
+    assert any("gap of 3 year" in line for line in result.explanation)
+
+
+# --- skills missing in full -------------------------------------------------
+#
+# Only skills inside JOB_SKILL_VOCABULARY can be extracted at all: a posting
+# asking for a language we do not track is invisible to the extractor, by
+# design. These tests therefore use recognised skills.
+
+
+def test_all_required_skills_missing_scores_zero():
+    result = match_job(job(description="Required: Snowflake, Databricks."),
+                       profile(skills=["Python"]))
+    assert result.technical_score == 0
+    assert result.matched_required == ()
+    assert set(result.missing_required) == {"Snowflake", "Databricks"}
+
+
+def test_all_preferred_skills_missing_scores_zero():
+    result = match_job(job(description="Nice to have: Power BI, Tableau Desktop."),
+                       profile(skills=["Python"]))
+    assert result.technical_score == 0
+    assert set(result.missing_preferred) == {"Power BI", "Tableau Desktop"}
+
+
+def test_partial_required_coverage_halves_the_score():
+    result = match_job(job(description="Required: Snowflake, Python."),
+                       profile(skills=["Python"]))
+    assert result.technical_score == 50
+    assert result.matched_required == ("Python",)
+    assert result.missing_required == ("Snowflake",)
+
+
+def test_unknown_vocabulary_skills_are_not_fabricated_into_missing():
+    """An untracked skill must never be invented into the missing list."""
+    result = match_job(job(description="Required: Rust and Elixir."),
+                       profile(skills=["Python"]))
+    assert result.missing_required == ()
+    assert "Rust" not in result.explanation
+    assert "Elixir" not in result.explanation
+
+def test_location_match_when_posting_is_in_preferred_list():
+    result = match_job(job(location="Germany, Remote"),
+                       profile(skills=["Python"], preferred_locations=["Germany"]))
+    assert result.contract_score == 100
+    assert result.contract_fit == "FIT"
+
+
+def test_location_mismatch_when_posting_is_elsewhere():
+    result = match_job(job(location="Brazil"),
+                       profile(skills=["Python"], preferred_locations=["Germany"]))
+    assert result.contract_score == 0
+    assert result.contract_fit == "MISMATCH"
+
+
+@pytest.mark.parametrize("location", [
+    "Worldwide", "Anywhere", "Remote - Worldwide", "Global team",
+])
+def test_worldwide_posting_satisfies_any_location_preference(location):
+    result = match_job(job(location=location),
+                       profile(skills=["Python"], preferred_locations=["Germany"]))
+    assert result.contract_score == 100
+
+
+def test_no_geographic_inference_is_made():
+    """"Europe" must not be assumed to include "Germany"."""
+    result = match_job(job(location="Europe"),
+                       profile(skills=["Python"], preferred_locations=["Germany"]))
+    assert result.contract_score == 0
+    assert result.contract_fit == "MISMATCH"
+
+
+def test_location_is_unknown_when_the_posting_states_none():
+    result = match_job(job(location=None, description="Build ETL with SQL."),
+                       profile(skills=["Python"], preferred_locations=["Germany"]))
+    assert result.contract_score is None
+    assert result.contract_fit == UNKNOWN
+
+
+def test_location_is_unknown_when_candidate_states_no_preference():
+    """An empty preferred_locations must never count as a pass."""
+    result = match_job(job(location="Brazil"),
+                       profile(skills=["Python"], preferred_locations=[]))
+    assert result.contract_score is None
+    assert result.contract_fit == UNKNOWN
+
+
+def test_blank_location_is_a_mismatch_not_a_pass():
+    result = match_job(job(location="   "),
+                       profile(skills=["Python"], preferred_locations=["Germany"]))
+    assert result.contract_score == 0
+
+
+def test_location_check_combines_with_contract_type_checks():
+    """Each stated dimension contributes; the score is their mean."""
+    result = match_job(job(title="Contract Data Engineer", location="Germany"),
+                       profile(skills=["Python"],
+                               preferred_contract_types=["contract"],
+                               preferred_locations=["Germany"]))
+    assert result.contract_score == 100   # both checks pass
+
+    mixed = match_job(job(title="Contract Data Engineer", location="Brazil"),
+                      profile(skills=["Python"],
+                              preferred_contract_types=["contract"],
+                              preferred_locations=["Germany"]))
+    assert mixed.contract_score == 50      # one of two checks
+    assert mixed.contract_fit == "MISMATCH"
+
+
 def test_extract_contract_and_remote():
     reqs = extract_requirements(job(description="Freelance, fully remote role."),
                                 profile())

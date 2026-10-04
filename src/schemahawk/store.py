@@ -8,6 +8,17 @@ Design:
 - Cross-run dedup works through the indexed keys ``url_canonical``,
   ``content_hash``, ``company_title`` and ``(source, source_job_id)``.
 - ``pipeline_runs`` stores one row per run, including the rendered report.
+- Columns added after the first release are applied by ``_migrate`` below.
+
+Known gap - technical debt, deliberately not changed here:
+``jobs.contract_type`` stores whatever a single adapter produced
+(``CONTRACT`` / ``PART_TIME`` / ``FULL_TIME``), so the stored vocabulary is a
+union of each board's own labels rather than one agreed taxonomy - and boards
+publish overlapping vocabularies (freelance / contract / independent contractor
+/ temporary / project-based / contract-to-hire). The column is intentionally
+left as-is; it should be revisited as a normalization step rather than widened
+here, and ``_score_contract`` in ``matching`` already reads contract signal
+from posting text instead.
 """
 from __future__ import annotations
 

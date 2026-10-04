@@ -319,4 +319,131 @@ def test_remotive_naive_timestamp_is_fresh(settings, monkeypatch):
     assert 0 <= (job.freshness_minutes or 0) <= 1
 
 
+# --- compensation wiring (offline; fixtures only) ---------------------------
+#
+# These guard the *adapter mapping*, not the parser: that a board's pay fields
+# actually reach ``Job.compensation``. The parser itself is covered in
+# ``test_normalize``; this is the wiring most likely to regress silently.
+
+def test_remoteok_salary_fields_reach_compensation(settings, monkeypatch):
+    payload = load_json("remoteok.json")
+    source = RemoteOKSource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: payload)
+    jobs = source.fetch()
+
+    paid = [j for j in jobs if j.compensation and j.compensation.is_known]
+    assert paid, "fixture should contain at least one job with salary_min"
+
+    # Match the fixture's own values, so the mapping is verified end to end.
+    by_id = {str(e.get("id")): e for e in payload if isinstance(e, dict)}
+    for job in paid:
+        entry = by_id[job.source_job_id]
+        assert job.compensation.min_value == float(entry["salary_min"])
+        assert job.compensation.max_value == float(entry["salary_max"])
+
+
+def test_remoteok_leaves_period_unknown(settings, monkeypatch):
+    """RemoteOK publishes no period, so none may be invented."""
+    payload = load_json("remoteok.json")
+    source = RemoteOKSource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: payload)
+    for job in source.fetch():
+        if job.compensation:
+            assert job.compensation.period is None
+            assert job.compensation.currency is None
+
+
+def test_remoteok_job_without_salary_has_no_compensation(settings, monkeypatch):
+    payload = {"id": 1, "position": "Data Engineer", "company": "Acme",
+               "url": "https://remoteok.com/remote-jobs/x",
+               "tags": ["sql"], "epoch": 1767225600}
+    source = RemoteOKSource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: [payload])
+    job = source.fetch()[0]
+    assert job.compensation is None
+
+
+def test_remotive_salary_text_reaches_compensation(settings, monkeypatch):
+    payload = load_json("remotive.json")
+    source = RemotiveSource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: payload)
+    paid = [j for j in source.fetch() if j.compensation and j.compensation.is_known]
+    assert paid, "fixture should contain a job with salary text"
+
+    for job in paid:
+        assert job.compensation.min_value is not None
+        assert job.compensation.max_value is not None
+        # The original string is kept verbatim for auditability.
+        assert job.compensation.raw
+
+
+def test_remotive_salary_string_is_parsed_not_guessed(settings, monkeypatch):
+    """'$20k -$35k' (no space after the dash) must still yield a range."""
+    payload = {"jobs": [{"id": 9, "title": "Freelance Data Engineer",
+                         "company_name": "Acme",
+                         "publication_date": "2026-01-15T10:00:00",
+                         "url": "https://remotive.com/remote-jobs/9",
+                         "salary": "$20k -$35k", "job_type": "freelance"}]}
+    source = RemotiveSource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: payload)
+    job = source.fetch()[0]
+    assert job.compensation.min_value == 20000.0
+    assert job.compensation.max_value == 35000.0
+    assert job.compensation.currency == "USD"
+    assert job.compensation.raw == "$20k -$35k"
+
+
+def test_remotive_job_without_salary_has_no_compensation(settings, monkeypatch):
+    payload = {"jobs": [{"id": 10, "title": "Data Engineer",
+                         "company_name": "Acme",
+                         "publication_date": "2026-01-15T10:00:00",
+                         "url": "https://remotive.com/remote-jobs/10"}]}
+    source = RemotiveSource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: payload)
+    assert source.fetch()[0].compensation is None
+
+
+def test_jobicy_structured_salary_is_mapped(settings, monkeypatch):
+    """Synthetic payload: the recorded fixture predates salary fields."""
+    payload = {"jobs": [{
+        "id": 5, "jobTitle": "Contract Data Engineer", "companyName": "Acme",
+        "pubDate": "2026-01-15T10:00:00", "url": "https://jobicy.com/job/5",
+        "jobGeo": "Worldwide", "jobType": ["Contract"],
+        "jobDescription": "Build ETL with SQL.",
+        "salaryMin": 45, "salaryMax": 60, "salaryCurrency": "USD",
+        "salaryPeriod": "hourly",
+    }]}
+    source = JobicySource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: payload)
+    job = source.fetch()[0]
+    assert job.compensation is not None
+    assert job.compensation.min_value == 45.0
+    assert job.compensation.max_value == 60.0
+    assert job.compensation.currency == "USD"
+    assert job.compensation.period == "hour"
+
+
+def test_jobicy_job_without_salary_has_no_compensation(settings, monkeypatch):
+    payload = {"jobs": [{
+        "id": 6, "jobTitle": "Data Engineer", "companyName": "Acme",
+        "pubDate": "2026-01-15T10:00:00", "url": "https://jobicy.com/job/6",
+        "jobGeo": "Worldwide", "jobDescription": "Build ETL with SQL.",
+    }]}
+    source = JobicySource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: payload)
+    assert source.fetch()[0].compensation is None
+
+
+def test_jobicy_absent_salary_keys_yield_none(settings, monkeypatch):
+    """Absent keys must not become zero (which would read as unpaid)."""
+    payload = {"jobs": [{
+        "id": 7, "jobTitle": "Data Engineer", "companyName": "Acme",
+        "pubDate": "2026-01-15T10:00:00", "url": "https://jobicy.com/job/7",
+        "jobDescription": "x",
+    }]}
+    source = JobicySource(settings)
+    monkeypatch.setattr(source, "get_json", lambda *a, **k: payload)
+    comp = source.fetch()[0].compensation
+    assert comp is None
+
 
