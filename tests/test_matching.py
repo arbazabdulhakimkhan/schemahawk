@@ -50,11 +50,21 @@ def test_case_insensitive_skill_match():
 
 
 def test_skill_match_respects_token_boundaries():
-    """A skill must never match inside a longer word."""
+    """A skill must never match inside a longer word.
+
+    "PostgreSQL" contains "SQL" but must not satisfy it. It is now recognized
+    as its own skill, so the job reports a real (missing) requirement rather
+    than nothing - the boundary rule is what keeps ``SQL`` out of the match.
+    """
     result = match_job(job(description="PostgreSQL and Microsoft support."),
                        profile(skills=["SQL"]))
+    # The boundary rule holds: "SQL" is not satisfied by "PostgreSQL".
+    assert "SQL" not in result.matched_preferred
+    # PostgreSQL is now recognized as a job requirement the candidate lacks:
+    # nothing matched, and the gap is reported instead of being invisible.
     assert result.matched_preferred == ()
-    assert result.technical_score is None
+    assert result.missing_preferred == ("PostgreSQL",)
+    assert result.technical_score == 0
 
 
 def test_skill_alias_spellings_are_matched():

@@ -27,7 +27,13 @@ from dataclasses import dataclass
 
 from .models import Job
 from .profile import CandidateProfile
+from .skills import DEFAULT_VOCABULARY, alias_map, canonical_names, vocabulary_for
 from .textmatch import matched_phrases, matcher_for_phrase
+
+# Backwards-compatible name: extraction still scans a flat tuple of canonical
+# skill names. The definitions now live in ``skills`` so the vocabulary can carry
+# categories and aliases without changing this module.
+JOB_SKILL_VOCABULARY: tuple[str, ...] = canonical_names(DEFAULT_VOCABULARY)
 
 # --- component weights (candidate match only; unrelated to V1 relevance) -----
 W_TECHNICAL = 0.50
@@ -201,15 +207,23 @@ def extract_requirements(job: Job, profile: CandidateProfile) -> JobRequirements
 
     remote = _extract_remote(text)
 
-    skills = JOB_SKILL_VOCABULARY
+    # Each canonical name *and* each alias is searched, then reported under its
+    # canonical name. Searching canonical names alone would miss a posting that
+    # only says "s3" or "k8s", which is the common case.
+    vocabulary = vocabulary_for(profile)
+    aliases = alias_map(vocabulary)
+    phrases = canonical_names(vocabulary) + tuple(aliases)
+
     required: list[str] = []
     preferred: list[str] = []
     for sentence in _sentences(text):
-        found = matched_phrases(sentence, skills)
+        found = matched_phrases(sentence, phrases)
         if not found:
             continue
         is_required = bool(_REQUIRED_HINT.search(sentence))
-        for skill in found:
+        for phrase in found:
+            # An alias hit is reported under the canonical skill name.
+            skill = aliases.get(phrase.lower(), phrase)
             if is_required:
                 if skill not in required:
                     required.append(skill)
@@ -232,18 +246,9 @@ def extract_requirements(job: Job, profile: CandidateProfile) -> JobRequirements
 # compared against the result. Extracting only the profile's own skills (an
 # earlier version) made a missing skill undetectable by construction.
 #
-# Canonical names match the spellings used in config/profile.yaml, so a job
-# saying "Tableau" is reported as the declared "Tableau Desktop".
-JOB_SKILL_VOCABULARY: tuple[str, ...] = (
-    "SQL", "Python", "Java", "Scala", "Spark", "PySpark",
-    "Databricks", "Snowflake", "Google BigQuery", "Redshift", "Synapse",
-    "Azure Data Factory (ADF)", "Airflow", "dbt", "Kafka", "ETL / ELT",
-    "Informatica", "SSIS", "Talend", "Alteryx Designer", "Power BI",
-    "Power Query", "Tableau Desktop", "Tableau Server", "DAX",
-    "Azure SQL", "REST APIs", "Jira REST API", "GitHub",
-    "Data quality / QA", "Dashboard development", "Data Modeling",
-    "AWS", "Azure", "GCP", "Hadoop", "Hive",
-)
+# The vocabulary itself - canonical names, aliases and categories - lives in
+# ``schemahawk.skills``. ``JOB_SKILL_VOCABULARY`` above is the flat view kept
+# for backwards compatibility; a second definition here would silently shadow it.
 
 # Sentence-ish chunks. The trailing lookaround keeps a final token that ends at
 # the end of the text matchable: splitting "use Snowflake." on the period leaves
