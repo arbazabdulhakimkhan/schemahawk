@@ -1,0 +1,3 @@
+# Development / test dependencies (V1: standard-library-only runtime + pytest).
+-r requirements.txt
+pytest>=8.0

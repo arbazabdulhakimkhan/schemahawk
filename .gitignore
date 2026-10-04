@@ -19,9 +19,11 @@ Thumbs.db
 # --- Notebooks ---
 .ipynb_checkpoints/
 
-# --- Local data / outputs ---
+# --- Local data / outputs (never commit) ---
+data/
+reports/
+.pytest_cache/
 *.sqlite3
 *.db
-data/local/
 out/
 logs/

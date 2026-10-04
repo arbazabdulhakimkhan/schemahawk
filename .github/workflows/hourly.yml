@@ -4,14 +4,51 @@ on:
   schedule:
     # Every hour at minute 0 (UTC)
     - cron: "0 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Poll only this source (blank = all enabled sources)"
+        required: false
+        default: ""
+      since:
+        description: "Candidate window, e.g. 60, 90m, 3h (blank = config default)"
+        required: false
+        default: ""
+      min_score:
+        description: "Minimum relevance score (blank = config default)"
+        required: false
+        default: ""
+
+# Never let two discovery runs overlap and race on the cached database.
+concurrency:
+  group: hourly-discovery
+  cancel-in-progress: false
+
+env:
+  PYTHONPATH: src
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run test suite (offline, no network)
+        run: python -m pytest -q
+
   discover:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      PYTHONPATH: src
     steps:
       - uses: actions/checkout@v4
 
@@ -23,10 +60,59 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run schemahawk (dry-run until V1 is live)
+      - name: Restore job database (cross-run dedup)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/schemahawk.db
+          key: schemahawk-db-${{ github.run_id }}
+          restore-keys: |
+            schemahawk-db-
+
+      - name: Discover fresh opportunities
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MAX_OPPORTUNITY_AGE_MINUTES: "60"
-        run: python -m schemahawk --dry-run
+          # Optional sources: leave the secrets unset to skip them cleanly.
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+          GREENHOUSE_BOARDS: ${{ vars.GREENHOUSE_BOARDS }}
+          LEVER_BOARDS: ${{ vars.LEVER_BOARDS }}
+          FRESH_MAX_MINUTES: "60"
+          RECENT_MAX_MINUTES: "180"
+          SCHEMAHAWK_DB: data/schemahawk.db
+        run: |
+          ARGS="--report-dir reports"
+          if [ -n "${{ github.event.inputs.source }}" ]; then
+            ARGS="$ARGS --source ${{ github.event.inputs.source }}"
+          fi
+          if [ -n "${{ github.event.inputs.since }}" ]; then
+            ARGS="$ARGS --since ${{ github.event.inputs.since }}"
+          fi
+          if [ -n "${{ github.event.inputs.min_score }}" ]; then
+            ARGS="$ARGS --min-score ${{ github.event.inputs.min_score }}"
+          fi
+          python -m schemahawk $ARGS
+
+      - name: Show database summary
+        if: always()
+        continue-on-error: true
+        run: python scripts/inspect_db.py data/schemahawk.db
+
+      - name: Upload run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovery-report-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Save job database (cross-run dedup)
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: data/schemahawk.db
+          key: schemahawk-db-${{ github.run_id }}
+
