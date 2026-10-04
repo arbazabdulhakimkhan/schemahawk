@@ -10,6 +10,15 @@ venv/
 # --- Secrets (NEVER commit) ---
 .env
 
+# --- Candidate profile (PRIVATE, never commit) ---
+# config/profile.example.yaml IS committed (generic template only).
+# The real profile stays local and must never reach the public repository.
+/config/profile.yaml
+/config/*.local.yaml
+/config/*.private.yaml
+/config/profile.*.yaml
+!config/profile.example.yaml
+
 # --- Editors / OS ---
 .vscode/
 .idea/

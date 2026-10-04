@@ -69,6 +69,7 @@ class Settings:
     # --- profile ---
     master_resume_path: str = "data/master_resume.docx"
     target_titles: tuple[str, ...] = ("Data Engineer",)
+    candidate_profile_path: str = "config/profile.yaml"
 
     # --- freshness thresholds (minutes) ---
     fresh_max_minutes: int = 60
@@ -103,6 +104,8 @@ class Settings:
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
             master_resume_path=os.getenv("RESUME_MASTER_PATH", "data/master_resume.docx"),
+            candidate_profile_path=os.getenv("CANDIDATE_PROFILE_PATH",
+                                              "config/profile.yaml"),
             target_titles=_csv(os.getenv("PROFILE_TITLES")) or ("Data Engineer",),
             fresh_max_minutes=_int_env("FRESH_MAX_MINUTES", 60),
             recent_max_minutes=_int_env("RECENT_MAX_MINUTES", 180),
@@ -136,6 +139,7 @@ class Settings:
             "adzuna app id": mask(self.adzuna_app_id),
             "adzuna app key": mask(self.adzuna_app_key),
             "target titles": ", ".join(self.target_titles),
+            "profile path": self.candidate_profile_path,
             "fresh <= minutes": str(self.fresh_max_minutes),
             "recent <= minutes": str(self.recent_max_minutes),
             "min relevance score": str(self.min_relevance_score),

@@ -1,0 +1,71 @@
+# SchemaHawk candidate profile - EXAMPLE TEMPLATE (safe to commit).
+#
+# Copy this file to config/profile.yaml and fill it in. config/profile.yaml is
+# git-ignored: your real profile is personal data and must never be committed to
+# the public repository.
+#
+#   cp config/profile.example.yaml config/profile.yaml
+#
+# RULES the loader enforces (see src/schemahawk/profile.py):
+#   * Every optional field may be null / [] meaning "not specified".
+#   * Values are NEVER inferred. If total_years_experience is null, the matcher
+#     reports an unknown experience match instead of guessing one.
+#   * Unknown keys are preserved, not rejected, so the schema can grow without
+#     breaking existing profiles.
+#
+# Every value below is a generic placeholder.
+
+version: 1
+
+# --- Who the candidate is ---------------------------------------------------
+# Never printed in logs, reports or CI artifacts.
+candidate:
+  name: "Example Candidate"
+  contact_email: null
+  headline: null
+
+# --- Experience -------------------------------------------------------------
+# Leave total_years_experience null unless you want it to factor into scoring.
+total_years_experience: null      # e.g. 8
+seniority: null                   # junior | mid | senior | staff | lead | principal
+availability: null                # e.g. "immediate", "2 weeks notice"
+
+timezone: "UTC+0"
+work_authorization: null           # e.g. "citizen", "sponsorship-required"
+
+# --- Skills -----------------------------------------------------------------
+# proficiency: beginner | intermediate | advanced | expert | null
+# years: number | null            last_used: "YYYY-MM" | null
+skills:
+  - name: "SQL"
+    category: null                # e.g. "database", "cloud", "bi", "orchestration"
+    proficiency: null
+    years: null
+    last_used: null
+  - name: "Python"
+    category: null
+    proficiency: null
+    years: null
+    last_used: null
+
+# --- History (optional, never reported) -------------------------------------
+employment_history: []             # [{company, title, start, end, summary}]
+projects: []                       # [{name, description, skills, url}]
+certifications: []                 # [{name, issuer, year, expires}]
+education: []                      # [{institution, qualification, year, field}]
+languages: []                      # [{name, proficiency}]
+
+# --- Preferences ------------------------------------------------------------
+# Empty lists mean "no preference", not "no interest".
+preferred_contract_types: []       # e.g. [contract, freelance, part_time]
+preferred_locations: []            # [] = worldwide
+remote_preference: null            # onsite | hybrid | remote-first | remote-only
+preferred_timezones: []            # [] = flexible
+
+# --- Rate expectations ------------------------------------------------------
+# period: hour | day | month | project
+preferred_rate: null               # {currency: USD, min: null, max: null, period: hour}
+
+# --- Free-form escape hatch -------------------------------------------------
+# Anything here is preserved verbatim and exposed as .extras.
+preferences: {}

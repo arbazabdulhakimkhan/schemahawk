@@ -12,6 +12,7 @@ dependencies = [
     "openai>=1.40",
     "python-dotenv>=1.0",
     "requests>=2.32",
+    "PyYAML>=6.0",
 ]
 
 [tool.setuptools.packages.find]
