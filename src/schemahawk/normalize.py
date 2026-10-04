@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, urlunsplit
 
+from .models import Compensation, RATE_PERIODS
+
 _WS = re.compile(r"\s+")
 _TAG = re.compile(r"<[^>]*>")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -70,6 +72,128 @@ def strip_html(raw: object, max_len: int | None = None) -> str | None:
     text = _TAG.sub(" ", text)
     text = html.unescape(text)
     return clean_text(text, max_len)
+# --- compensation parsing ---------------------------------------------------
+#
+# Live API shapes observed, all of which were previously discarded:
+#   Jobicy    salaryMin / salaryMax / salaryCurrency / salaryPeriod ("hourly")
+#   RemoteOK  salary_min / salary_max          (no period published at all)
+#   Remotive  salary: "$90k - $105k"           (a formatted string)
+
+_CURRENCY_SYMBOL = {"$": "USD", "\u00a3": "GBP", "\u20ac": "EUR", "\u20b9": "INR"}
+_CURRENCY_CODES = frozenset(
+    {"USD", "GBP", "EUR", "INR", "CAD", "AUD", "CHF", "SEK", "PLN", "NZD"})
+# The alternation must be grouped: without the non-capturing wrapper it binds
+# to the *whole* pattern, so the range tail silently stopped matching.
+_NUM = r"(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+_NUM_RANGE = re.compile(
+    rf"({_NUM}\s*[kK]?)\s*(?:-|\u2013|to|\u2014)\s*"
+    r"(?:[$\u00a3\u20ac\u20b9]\s*)?"
+    rf"({_NUM}\s*[kK]?)", re.I)
+_COMPENSATION = re.compile(
+    r"([$\u00a3\u20ac\u20b9]|USD|GBP|EUR|INR|CAD|AUD)\s*"
+    rf"({_NUM}\s*[kK]?(?:\s*(?:-|\u2013|to|\u2014)\s*"
+    r"(?:[$\u00a3\u20ac\u20b9]\s*)?"
+    rf"{_NUM}\s*[kK]?)?)"
+    r"(?:\s*(?:/|per)\s*([A-Za-z]{2,9}))?",
+    re.I,
+)
+_PERIOD_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("hour", ("per hour", "/hour", "/hr", "hourly", "an hour", "hr")),
+    ("day", ("per day", "/day", "daily", "day rate")),
+    ("month", ("per month", "/month", "monthly")),
+    ("year", ("per year", "/year", "annually", "yearly", "per annum", "/yr")),
+    ("project", ("per project", "fixed price", "fixed-price", "project fee")),
+)
+
+
+def _clean_number(text: str) -> float:
+    """Parse "1,500", "90k" or "80.5". A trailing ``k`` means thousand."""
+    stripped = text.strip()
+    scale = 1000.0 if stripped.lower().endswith("k") else 1.0
+    value = float(stripped[:-1].replace(",", "")) if scale > 1.0 \
+        else float(stripped.replace(",", ""))
+    return value * scale
+
+
+def _to_float(value: object) -> float | None:
+    """Coerce a board-supplied number. Bools are rejected (bool subclasses int)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return _clean_number(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _period_from(value: object) -> str | None:
+    """Map a published period to our vocabulary, or ``None`` if unstated.
+
+    A period is never defaulted: RemoteOK's ``salary_min`` of 170000 is plainly
+    annual, but nothing in the payload says so, so ``period`` stays ``None``
+    instead of being guessed.
+    """
+    text = str(value).strip().lower() if value is not None else ""
+    if not text:
+        return None
+    for period, hints in _PERIOD_HINTS:
+        if any(hint in text for hint in hints):
+            return period
+    return text if text in RATE_PERIODS else None
+
+
+def parse_compensation(text: object = None, *, min_value: object = None,
+                       max_value: object = None, currency: object = None,
+                       period: object = None) -> Compensation | None:
+    """Normalize whatever pay information a board published.
+
+    Structured fields take precedence (Jobicy). Otherwise the free-text form is
+    parsed (Remotive's "$90k - $105k"). Returns ``None`` when nothing was
+    published - never a zero-valued object, which would read as "unpaid".
+    """
+    raw = text.strip() if isinstance(text, str) and text.strip() else None
+
+    low = _to_float(min_value)
+    high = _to_float(max_value)
+    if low is not None or high is not None:
+        code = currency.strip().upper() if isinstance(currency, str) else None
+        return Compensation(
+            min_value=low,
+            max_value=high,
+            currency=code if code in _CURRENCY_CODES else None,
+            period=_period_from(period),
+            raw=raw,
+        )
+
+    if raw is None:
+        return None
+
+    match = _COMPENSATION.search(raw)
+    if match is None:
+        return Compensation(raw=raw)      # published something, unparseable
+
+    symbol, amount, suffix = match.group(1), match.group(2), match.group(3)
+    # ``search`` rather than ``match``: the captured amount can carry a
+    # trailing currency symbol ("90k - $105k"), so anchoring to the start is
+    # fine but the separator/symbol must be tolerated mid-string.
+    span = _NUM_RANGE.search(amount)
+    if span:
+        low, high = _clean_number(span.group(1)), _clean_number(span.group(2))
+    else:
+        low, high = _clean_number(amount), None
+
+    symbol_upper = symbol.upper()
+    return Compensation(
+        min_value=low,
+        max_value=high,
+        currency=(symbol_upper if symbol_upper in _CURRENCY_CODES
+                  else _CURRENCY_SYMBOL.get(symbol)),
+        period=_period_from(suffix),
+        raw=raw,
+    )
 
 
 def canonical_url(url: object) -> str | None:

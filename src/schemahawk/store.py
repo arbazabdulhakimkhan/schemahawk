@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     country TEXT,
     timezone TEXT,
     work_authorization TEXT,
+    compensation_min REAL,
+    compensation_max REAL,
+    compensation_currency TEXT,
+    compensation_period TEXT,
+    compensation_raw TEXT,
     quality_status TEXT,
     eligibility_status TEXT,
     relevance_score INTEGER,
@@ -96,6 +101,8 @@ INSERT INTO jobs (
     posted_at_raw, timestamp_confidence, freshness_minutes, freshness_status,
     discovered_at, last_seen_at, times_seen, application_url, recruiter_name,
     recruiter_url, contact_email, country, timezone, work_authorization,
+    compensation_min, compensation_max, compensation_currency,
+    compensation_period, compensation_raw,
     quality_status, eligibility_status, relevance_score, rejection_reason,
     status, created_at, updated_at
 ) VALUES (
@@ -104,10 +111,24 @@ INSERT INTO jobs (
     :posted_at_raw, :timestamp_confidence, :freshness_minutes, :freshness_status,
     :discovered_at, :last_seen_at, 1, :application_url, :recruiter_name,
     :recruiter_url, :contact_email, :country, :timezone, :work_authorization,
+    :compensation_min, :compensation_max, :compensation_currency,
+    :compensation_period, :compensation_raw,
     :quality_status, :eligibility_status, :relevance_score, :rejection_reason,
     :status, :created_at, :updated_at
 )
 """
+
+
+# Columns added after the first release. Kept in one place so the migration and
+# the CREATE TABLE above stay in step; every entry must be nullable with a
+# default so existing rows keep working.
+_ADDED_COLUMNS: dict[str, str] = {
+    "compensation_min": "REAL",
+    "compensation_max": "REAL",
+    "compensation_currency": "TEXT",
+    "compensation_period": "TEXT",
+    "compensation_raw": "TEXT",
+}
 
 
 def iso_utc(value: datetime | None) -> str | None:
@@ -145,7 +166,25 @@ class Store:
             self.conn.execute("PRAGMA busy_timeout=5000")
         if not read_only:
             self.conn.executescript(_SCHEMA)
+            self._migrate()
             self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created.
+
+        ``CREATE TABLE IF NOT EXISTS`` silently leaves an older table alone, so
+        without this an existing ``data/schemahawk.db`` would keep working until
+        an INSERT referenced a column that was never added. Every statement is
+        additive and idempotent, and runs in a transaction so a failure cannot
+        leave a half-migrated file.
+        """
+        existing = {row["name"] for row in
+                    self.conn.execute("PRAGMA table_info(jobs)")}
+        if not existing:
+            return
+        for column, decl in _ADDED_COLUMNS.items():
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
         self.conn.close()
@@ -293,6 +332,17 @@ class Store:
             "SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT ?", (limit,)))
 
 
+def _comp(job: Job, field: str):
+    """One compensation field, or ``None`` when the source published no pay.
+
+    Reading through the dataclass keeps the five columns in lockstep with
+    :class:`~schemahawk.models.Compensation`; a missing object yields ``None``
+    rather than a zero that would read as "unpaid".
+    """
+    comp = getattr(job, "compensation", None)
+    return getattr(comp, field, None) if comp is not None else None
+
+
 def _job_row(job: Job, now: str) -> dict:
     """Flatten a Job into the column dict used by ``_INSERT_JOB``."""
     return {
@@ -323,6 +373,11 @@ def _job_row(job: Job, now: str) -> dict:
         "country": job.country,
         "timezone": job.timezone,
         "work_authorization": job.work_authorization,
+        "compensation_min": _comp(job, "min_value"),
+        "compensation_max": _comp(job, "max_value"),
+        "compensation_currency": _comp(job, "currency"),
+        "compensation_period": _comp(job, "period"),
+        "compensation_raw": _comp(job, "raw"),
         "quality_status": job.quality_status,
         "eligibility_status": job.eligibility_status,
         "relevance_score": job.relevance_score,

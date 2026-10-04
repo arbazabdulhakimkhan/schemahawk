@@ -12,7 +12,7 @@ to confidence 95 (exact but tz-naive).
 from __future__ import annotations
 
 from ..models import CONTRACT, FULL_TIME, PART_TIME, Job
-from ..normalize import clean_text, parse_timestamp, strip_html
+from ..normalize import clean_text, parse_compensation, parse_timestamp, strip_html
 from .base import BaseSource
 
 API_URL = "https://remotive.com/api/remote-jobs"
@@ -83,6 +83,7 @@ def _to_job(source: RemotiveSource, entry: object) -> Job | None:
         location=location,
         remote=remote,
         contract_type=contract_type,
+        compensation=parse_compensation(entry.get("salary")),
         posted_at=posted_at,
         posted_at_raw=str(raw) if raw else None,
         timestamp_confidence=confidence,

@@ -56,6 +56,34 @@ CONTRACT = "CONTRACT"
 PART_TIME = "PART_TIME"
 FULL_TIME = "FULL_TIME"
 
+# --- compensation vocabulary -----------------------------------------------
+# Several job boards publish pay, and several report it differently. These
+# constants keep one vocabulary in one place; ``None`` always means "the source
+# did not say", never "zero" and never "unpaid".
+RATE_PERIODS: tuple[str, ...] = ("hour", "day", "month", "year", "project")
+
+
+@dataclass(frozen=True)
+class Compensation:
+    """Pay a source published, normalized across differing board formats.
+
+    Every field is optional because boards differ: some publish a min/max pair,
+    some a single number, some only a formatted string. Nothing is estimated - a
+    missing ``period`` stays ``None`` rather than being defaulted, because
+    "170000" means hourly in one feed and annually in another.
+    """
+
+    min_value: float | None = None
+    max_value: float | None = None
+    currency: str | None = None
+    period: str | None = None
+    raw: str | None = None
+
+    @property
+    def is_known(self) -> bool:
+        """True when any pay value was actually published."""
+        return any(v is not None for v in (self.min_value, self.max_value, self.raw))
+
 
 @dataclass
 class Job:
@@ -80,6 +108,7 @@ class Job:
     location: str | None = None
     remote: bool | None = None
     contract_type: str | None = None
+    compensation: Compensation | None = None
 
     # --- timing ---
     posted_at: datetime | None = None

@@ -107,3 +107,111 @@ def test_parse_timestamp_epoch_milliseconds():
 def test_parse_timestamp_empty_and_none():
     assert n.parse_timestamp(None) == (None, None)
     assert n.parse_timestamp("") == (None, None)
+
+# --- compensation parsing ---------------------------------------------------
+#
+# Shapes taken from the live APIs, all of which used to be discarded:
+#   Jobicy    salaryMin / salaryMax / salaryCurrency / salaryPeriod ("hourly")
+#   RemoteOK  salary_min / salary_max          (no period published at all)
+#   Remotive  salary: "$90k - $105k"           (a formatted string)
+
+D = "$"
+EUR = "\u20ac"
+GBP = "\u00a3"
+
+
+def test_nothing_published_yields_none_not_zero():
+    assert n.parse_compensation(None) is None
+    assert n.parse_compensation("") is None
+    assert n.parse_compensation("   ") is None
+
+
+def test_structured_jobicy_payload():
+    comp = n.parse_compensation(min_value=30, max_value=30,
+                                currency="USD", period="hourly")
+    assert (comp.min_value, comp.max_value) == (30.0, 30.0)
+    assert comp.currency == "USD"
+    assert comp.period == "hour"
+
+
+def test_structured_remoteok_keeps_period_unknown():
+    """170000 is plainly annual, but nothing says so: never guessed."""
+    comp = n.parse_compensation(min_value=170000, max_value=350000)
+    assert (comp.min_value, comp.max_value) == (170000.0, 350000.0)
+    assert comp.period is None
+    assert comp.currency is None
+
+
+def test_k_suffix_means_thousand():
+    assert n.parse_compensation(f"{D}120k").min_value == 120000.0
+
+
+def test_remotive_style_range_with_repeated_symbol():
+    comp = n.parse_compensation(f"{D}90k - {D}105k")
+    assert comp.min_value == 90000.0
+    assert comp.max_value == 105000.0
+    assert comp.currency == "USD"
+    assert comp.raw == f"{D}90k - {D}105k"
+
+
+def test_comma_thousands_separator():
+    comp = n.parse_compensation(f"{D}90,000 - {D}105,000")
+    assert comp.min_value == 90000.0
+    assert comp.max_value == 105000.0
+
+
+@pytest.mark.parametrize("text,period", [
+    (f"{D}60 per hour", "hour"),
+    (f"{D}60/hour", "hour"),
+    (f"{EUR}45/hr", "hour"),
+    (f"{GBP}400 per day", "day"),
+    (f"{D}5k per month", "month"),
+    (f"{D}100k per year", "year"),
+])
+def test_period_from_slash_and_word_forms(text, period):
+    assert n.parse_compensation(text).period == period
+
+
+def test_currency_from_symbol_and_code():
+    assert n.parse_compensation(f"{EUR}45/hr").currency == "EUR"
+    assert n.parse_compensation(f"{GBP}400/day").currency == "GBP"
+    assert n.parse_compensation(f"{D}60 per hour").currency == "USD"
+    assert n.parse_compensation(min_value=10, currency="eur").currency == "EUR"
+
+
+def test_unknown_currency_code_is_dropped_not_guessed():
+    comp = n.parse_compensation(min_value=10, currency="XYZ")
+    assert comp.currency is None
+    assert comp.min_value == 10.0
+
+
+def test_unparseable_text_keeps_raw_but_invents_no_numbers():
+    comp = n.parse_compensation("Competitive salary")
+    assert comp.is_known
+    assert comp.raw == "Competitive salary"
+    assert comp.min_value is None and comp.max_value is None
+
+
+def test_bool_is_not_treated_as_a_number():
+    """bool subclasses int; True must not become a salary of 1."""
+    assert n.parse_compensation(min_value=True) is None
+
+
+def test_junk_numbers_are_rejected():
+    assert n.parse_compensation(min_value="abc") is None
+    assert n.parse_compensation(min_value="") is None
+
+
+def test_empty_compensation_is_not_known():
+    from schemahawk.models import Compensation
+    assert Compensation().is_known is False
+    assert Compensation(min_value=1).is_known is True
+
+
+def test_compensation_attaches_to_the_job_model():
+    from schemahawk.models import Job
+    job = Job(source="x",
+              compensation=n.parse_compensation(min_value=30, period="hour"))
+    assert job.compensation.min_value == 30.0
+    assert job.compensation.period == "hour"
+

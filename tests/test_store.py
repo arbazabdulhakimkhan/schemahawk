@@ -95,4 +95,70 @@ def test_file_backed_store_and_read_only_reader(tmp_path):
 
 def test_iso_utc_serialization():
     assert iso_utc(None) is None
+
+def test_compensation_round_trips_through_storage():
+    from schemahawk.models import Compensation
+    job = make_job(url="https://e.com/pay", source_job_id="pay")
+    job.compensation = Compensation(min_value=30.0, max_value=45.0,
+                                    currency="USD", period="hour",
+                                    raw="$30 - $45 per hour")
+    with Store(None) as store:
+        assert store.upsert_jobs([job]) == (1, 0)
+        row = store.conn.execute(
+            "SELECT compensation_min, compensation_max, compensation_currency,"
+            " compensation_period, compensation_raw FROM jobs"
+        ).fetchone()
+    assert row["compensation_min"] == 30.0
+    assert row["compensation_max"] == 45.0
+    assert row["compensation_currency"] == "USD"
+    assert row["compensation_period"] == "hour"
+    assert row["compensation_raw"] == "$30 - $45 per hour"
+
+
+def test_missing_compensation_stores_null_not_zero():
+    """A job with no published pay must not look like it pays nothing."""
+    from schemahawk.normalize import attach_keys
+    job = make_job(url="https://e.com/nopay", source_job_id="nopay")
+    attach_keys(job)
+    assert job.compensation is None
+    with Store(None) as store:
+        store.upsert_jobs([job])
+        row = store.conn.execute(
+            "SELECT compensation_min, compensation_currency FROM jobs").fetchone()
+    assert row["compensation_min"] is None
+    assert row["compensation_currency"] is None
+
+
+def test_legacy_database_gains_compensation_columns(tmp_path):
+    """An existing database created before these columns must keep working."""
+    import sqlite3
+
+    from schemahawk.store import Store
+
+    path = tmp_path / "legacy.db"
+    with Store(str(path)):
+        pass  # create the current schema
+    # Rebuild the table without the compensation columns, as an older release.
+    conn = sqlite3.connect(path)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(jobs)")]
+    legacy = [c for c in cols if not c.startswith("compensation_")]
+    int_cols = {"times_seen", "timestamp_confidence", "freshness_minutes",
+                "relevance_score", "remote"}
+    decls = ", ".join(f"{c} {'INTEGER' if c in int_cols else 'TEXT'}"
+                      for c in legacy)
+    conn.execute("ALTER TABLE jobs RENAME TO jobs_old")
+    conn.execute(f"CREATE TABLE jobs ({decls})")
+    conn.execute(f"INSERT INTO jobs SELECT {', '.join(legacy)} FROM jobs_old")
+    conn.execute("DROP TABLE jobs_old")
+    conn.commit()
+    conn.close()
+
+    with Store(str(path)) as store:
+        after = [r["name"] for r in store.conn.execute("PRAGMA table_info(jobs)")]
+        assert "compensation_min" in after
+        # Re-opening must be a no-op rather than a duplicate-column error.
+    with Store(str(path)) as store:
+        again = [r["name"] for r in store.conn.execute("PRAGMA table_info(jobs)")]
+        assert len(again) == len(after)
+
     assert iso_utc(NOW) == "2026-01-15T12:00:00+00:00"

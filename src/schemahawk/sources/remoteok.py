@@ -10,7 +10,7 @@ exact and timezone-aware, so they map to confidence 100.
 from __future__ import annotations
 
 from ..models import CONTRACT, FULL_TIME, PART_TIME, Job
-from ..normalize import clean_text, parse_timestamp, strip_html
+from ..normalize import clean_text, parse_compensation, parse_timestamp, strip_html
 from .base import BaseSource, SourceError
 
 API_URL = "https://remoteok.com/api"
@@ -51,6 +51,10 @@ class RemoteOKSource(BaseSource):
                 location=_location_from_tags(tags),
                 remote=True,  # RemoteOK only lists remote roles
                 contract_type=_contract_from_tags(tags, title or ""),
+                compensation=parse_compensation(
+                    min_value=entry.get("salary_min"),
+                    max_value=entry.get("salary_max"),
+                ),
                 posted_at=posted_at,
                 posted_at_raw=_raw_timestamp(entry),
                 timestamp_confidence=confidence,
