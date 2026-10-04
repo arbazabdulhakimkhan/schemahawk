@@ -7,7 +7,8 @@ CI. AI-assisted matching is a V2 concern. Signals are configurable via
 Keywords are regex fragments matched on token boundaries - ``(?<!\\w)`` before
 and ``(?!\\w)`` after - so substrings never create false positives. This was
 added after live data showed "ssis" matching inside "a**ssis**tant" and "sql"
-matching inside "postgresql".
+matching inside "postgresql". The matcher itself lives in ``textmatch`` so the
+scorer and the V2 match engine share one implementation.
 
 Scoring (0-100):
   +60  the title contains a strong data-engineering role phrase
@@ -18,9 +19,8 @@ Scoring (0-100):
 """
 from __future__ import annotations
 
-import re
-
 from .models import Job
+from .textmatch import plain_fragment, token_matcher
 
 # Strong data-engineering role phrases.
 STRONG_ROLES: tuple[str, ...] = (
@@ -73,21 +73,11 @@ NEGATIVE_STRONG: tuple[str, ...] = (
 NEGATIVE_FLOOR = 5
 
 
-def _matcher(fragment: str) -> re.Pattern[str]:
-    """Compile a fragment so it only matches whole tokens."""
-    return re.compile(rf"(?<!\w)(?:{fragment})(?!\w)", re.I)
-
-
-def _plain_fragment(text: str) -> str:
-    """Turn arbitrary operator text into a token-boundary regex fragment."""
-    return r"\s+".join(re.escape(word) for word in text.split())
-
-
-_STRONG_MATCHERS = tuple(_matcher(fragment) for fragment in STRONG_ROLES)
-_TITLE_MATCHERS = tuple((_matcher(f), p) for f, p in TITLE_SKILLS)
-_DESC_MATCHERS = tuple((_matcher(f), p) for f, p in DESC_SKILLS)
-_CONTRACT_MATCHERS = tuple(_matcher(f) for f in CONTRACT_WORDS)
-_NEGATIVE_MATCHERS = tuple(_matcher(f) for f in NEGATIVE_STRONG)
+_STRONG_MATCHERS = tuple(token_matcher(fragment) for fragment in STRONG_ROLES)
+_TITLE_MATCHERS = tuple((token_matcher(f), p) for f, p in TITLE_SKILLS)
+_DESC_MATCHERS = tuple((token_matcher(f), p) for f, p in DESC_SKILLS)
+_CONTRACT_MATCHERS = tuple(token_matcher(f) for f in CONTRACT_WORDS)
+_NEGATIVE_MATCHERS = tuple(token_matcher(f) for f in NEGATIVE_STRONG)
 
 
 def score_relevance(job: Job, extra_strong_roles: tuple[str, ...] = ()) -> int:
@@ -95,7 +85,7 @@ def score_relevance(job: Job, extra_strong_roles: tuple[str, ...] = ()) -> int:
     title = job.title or ""
     description = job.description or ""
 
-    extra = tuple(_matcher(_plain_fragment(role))
+    extra = tuple(token_matcher(plain_fragment(role))
                   for role in extra_strong_roles if role and role.strip())
     has_strong_role = (
         any(pattern.search(title) for pattern in _STRONG_MATCHERS)
