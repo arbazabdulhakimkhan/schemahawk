@@ -855,3 +855,248 @@ def test_over_qualified_band_survives_the_gated_extraction():
                        profile(skills=["Python"], seniority="staff"))
     assert result.seniority_alignment == OVER_QUALIFIED
     assert result.experience_score == 100
+# --- contract duration (Phase 2C) ---------------------------------------
+# A duration only counts when its sentence is contract-flavoured. The ungated
+# "N months" scan fired on 6 of 171 live postings and got one right: "reached
+# unicorn status in 9 months" and "in the first 12 months" are company history
+# and onboarding milestones, not contract lengths.
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("6-month contract", 6.0),
+        ("6 month contract", 6.0),
+        ("contract for 6 months", 6.0),
+        ("12-month contract", 12.0),
+        ("12 month contract", 12.0),
+        ("18 months initially", 18.0),
+        ("a 24-month contract", 24.0),
+        ("1 month contract", 1.0),          # singular
+    ],
+)
+def test_plain_contract_durations_are_detected(text, expected):
+    duration = extract_requirements(job(description=text), profile()).contract_duration
+    assert duration is not None
+    assert duration.min_months == expected
+    assert duration.max_months == expected
+    assert duration.is_range is False
+
+
+@pytest.mark.parametrize(
+    ("text", "low", "high"),
+    [
+        ("3-6 month contract", 3.0, 6.0),
+        ("3 to 6 month contract", 3.0, 6.0),
+        ("between 3 and 6 months contract", 3.0, 6.0),
+        ("2\u20134 month term", 2.0, 4.0),   # en dash
+    ],
+)
+def test_ranges_are_preserved_not_collapsed(text, low, high):
+    duration = extract_requirements(job(description=text), profile()).contract_duration
+    assert duration is not None
+    assert (duration.min_months, duration.max_months) == (low, high)
+    assert duration.is_range is True
+    assert duration.label() == f"{low:g}-{high:g} months"
+
+
+def test_upper_bound_only_is_not_filled_in():
+    duration = extract_requirements(
+        job(description="up to 24 months contract"), profile()
+    ).contract_duration
+    assert duration is not None
+    assert duration.max_months == 24.0
+    assert duration.min_months is None
+    assert duration.label() == "up to 24 months"
+
+
+def test_lower_bound_only_is_not_filled_in():
+    duration = extract_requirements(
+        job(description="minimum 6 months contract"), profile()
+    ).contract_duration
+    assert duration is not None
+    assert duration.min_months == 6.0
+    assert duration.max_months is None
+    assert duration.label() == "at least 6 months"
+
+
+@pytest.mark.parametrize(
+    ("text", "months"),
+    [("12 week contract", 2.8), ("4-week assignment", 0.9), ("6 weeks contract", 1.4)],
+)
+def test_week_durations_are_normalised_to_months(text, months):
+    """Values are comparable; the source wording stays in ``unit``/``raw``."""
+    duration = extract_requirements(job(description=text), profile()).contract_duration
+    assert duration is not None
+    assert duration.min_months == months
+    assert duration.unit == "weeks"
+    assert duration.raw
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Company founded 18 months ago.",
+        "The pilot ran 36 months.",
+        "We served 24 months of uptime.",
+        "Served 4 months on probation.",
+        "A 12 months notice period applies.",
+        "Your scorecard at 90 days and 6 months.",
+        "Within 6 months, you'll own a key project.",   # "project" is not enough
+        "In The First 12 Months.",
+        "Full-time permanent role.",
+        "Salary 90000 per annum.",
+        "3+ years of experience.",
+        "35 hours per week.",
+        "We have 200 employees.",
+    ],
+)
+def test_misleading_numeric_phrases_yield_no_duration(text):
+    """Each of these returned a number before the evidence gate."""
+    assert extract_requirements(job(description=text), profile()).contract_duration is None
+
+
+def test_customer_engagement_is_not_a_contract_cue():
+    """A real posting used 'engagement' in the marketing sense.
+
+    "Strong, measurable engagement and results across the healthcare
+    partnerships ... in the first 12 months" - onboarding milestones, not a
+    contract length. Only "contract" supports a duration here.
+    """
+    text = ("What Success Looks Like In The First 12 Months "
+            "A growing roster of signed employer accounts. Strong, measurable "
+            "engagement and results across the healthcare partnerships.")
+    assert extract_requirements(job(description=text), profile()).contract_duration is None
+
+
+def test_relative_dates_are_never_calculated():
+    """No start date means no safe duration - never invent one."""
+    for text in ("Contract through December.",
+                 "Contract until end of year.",
+                 "Contract for the remainder of 2026."):
+        assert extract_requirements(job(description=text), profile()).contract_duration is None
+
+
+def test_missing_duration_is_none_not_zero():
+    duration = extract_requirements(
+        job(description="We build data pipelines."), profile()
+    ).contract_duration
+    assert duration is None
+
+
+def test_real_fixture_case_six_month_contract():
+    """Verbatim from a live posting: 'Growth Marketer (6-Month Contract)'."""
+    duration = extract_requirements(
+        job(title="Growth Marketer (6-Month Contract)",
+            description="Location: Remote. Great team."),
+        profile(),
+    ).contract_duration
+    assert duration is not None
+    assert duration.label() == "6 months"
+
+
+def test_duration_is_absent_for_a_permanent_role():
+    duration = extract_requirements(
+        job(title="Senior Data Engineer",
+            description="Permanent, full-time role. 40 hours per week."),
+        profile(),
+    ).contract_duration
+    assert duration is None
+
+
+def test_longest_stated_duration_wins_across_sentences():
+    duration = extract_requirements(
+        job(description="This is a 6 month contract. The initial term is 12 months."),
+        profile(),
+    ).contract_duration
+    assert duration is not None
+    assert duration.max_months == 12.0
+
+
+def test_contract_duration_is_not_persisted_or_scored():
+    """It is extraction-only: nothing scores it and no column stores it."""
+    from schemahawk.matching import MatchResult
+
+    fields = set(MatchResult.__dataclass_fields__)
+    assert not any("duration" in name for name in fields)
+# --- duration unit conversion policy ------------------------------------
+# Non-month units are converted and therefore rounded. A converted value must
+# never be presented as an exact contractual duration, so it carries
+# ``approximate=True`` and a "~" in its label.
+
+
+@pytest.mark.parametrize(
+    ("weeks", "months"),
+    [(1, 0.2), (2, 0.5), (4, 0.9), (6, 1.4), (8, 1.8),
+     (12, 2.8), (16, 3.7), (26, 6.0), (52, 12.0)],
+)
+def test_weeks_to_months_conversion_is_exact_and_pinned(weeks, months):
+    from schemahawk.matching import _DAYS_PER_MONTH, _to_months
+
+    assert _DAYS_PER_MONTH == 30.44
+    assert _to_months(weeks, "weeks") == months
+
+
+def test_conversion_basis_is_documented_and_not_inlined():
+    """The 30.44 basis must be a named constant so it cannot drift."""
+    from schemahawk.matching import _DAYS_PER_MONTH
+
+    assert isinstance(_DAYS_PER_MONTH, float)
+    assert 30.0 < _DAYS_PER_MONTH < 31.0
+
+
+def test_week_conversion_is_flagged_approximate():
+    """12 weeks is really 2.7595 months; 2.8 must not read as a stated figure."""
+    duration = extract_requirements(
+        job(description="12 week contract"), profile()
+    ).contract_duration
+    assert duration is not None
+    assert duration.min_months == 2.8
+    assert duration.approximate is True
+    assert duration.unit == "weeks"
+    assert duration.label().startswith("~")
+
+
+def test_month_durations_are_not_approximate():
+    duration = extract_requirements(
+        job(description="6-month contract"), profile()
+    ).contract_duration
+    assert duration is not None
+    assert duration.approximate is False
+    assert duration.label() == "6 months"
+
+
+def test_rounded_value_is_never_equal_to_a_stated_month_figure():
+    """12 weeks rounds to 2.8 months, which no posting would state as 2.8."""
+    converted = _to_months_for_test(12)
+    assert converted == 2.8
+    assert 12 * 7.0 / 30.44 != 2.8      # the conversion is genuinely lossy
+
+
+def test_conversion_is_deterministic_across_repeated_calls():
+    from schemahawk.matching import _to_months
+
+    values = {_to_months(12, "weeks") for _ in range(50)}
+    assert values == {2.8}
+
+
+def test_days_are_not_parsed_and_stay_unknown():
+    """No day-based duration exists in 171 live postings.
+
+    Every mention is a false candidate - "90 days and 6 months" (scorecard),
+    "20 days of paid time off" (holiday), "within the first 30 days of
+    employment" (onboarding), "3 days per week" (office schedule). Adding a
+    days rule would need evidence first.
+    """
+    for text in ("90-day contract", "90 day contract",
+                 "Within the first 30 days of employment",
+                 "20 days of paid time off"):
+        assert extract_requirements(
+            job(description=text), profile()
+        ).contract_duration is None
+
+
+def _to_months_for_test(weeks):
+    from schemahawk.matching import _to_months
+
+    return _to_months(weeks, "weeks")

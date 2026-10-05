@@ -138,7 +138,7 @@ class JobRequirements:
     # All are optional and default to "not stated". Silence is never turned into
     # "no requirement": an absent education or language field means the posting
     # did not mention one, not that none is needed.
-    contract_duration_months: float | None = None
+    contract_duration: "ContractDuration | None" = None
     education_level: str | None = None      # bachelors | masters | doctorate | equivalent_experience
     languages_required: tuple[str, ...] = ()
     timezone_requirement: str | None = None
@@ -334,7 +334,7 @@ def extract_requirements(job: Job, profile: CandidateProfile) -> JobRequirements
         contract_types=contract_types,
         remote_requirement=remote,
         location_restriction=(job.location or None),
-        contract_duration_months=_extract_duration(text),
+        contract_duration=_extract_duration(text),
         education_level=_extract_education(text),
         languages_required=_extract_languages(text),
         timezone_requirement=_timezone_requirement(job),
@@ -419,9 +419,40 @@ def _timezone_requirement(job: Job) -> str | None:
 # These patterns are deliberately narrow. Live job text contains "degree of
 # autonomy", "master modern approaches" and "master setup", so a bare "degree"
 # or "master" must never be treated as an education requirement.
-_DURATION_MONTHS = re.compile(
-    r"\b(?:for\s+|initial\s+|term\s+of\s+)?(\d{1,2})\s*[- ]?\s*months?\b"
-    r"|\b(?:initial\s+)?(\d{1,3})\s*[- ]?\s*(?:week|wks)s?\s+(?:contract|term|assignment)\b",
+# A duration only counts when its sentence is about a contract/engagement.
+# Measured over 171 live postings the ungated "N months" scan fired six times
+# and got one right: "reached unicorn status in 9 months", "in the first 12
+# months" and "within 6 months" are company history, onboarding milestones and
+# expectations. "period" and "probation" are deliberately NOT cues - a "12
+# month notice period" is not the length of the work - and neither is
+# "project": "within 6 months you'll own a key project" is exactly the phrasing
+# that produced a false positive, and the word appears in nearly every posting.
+# "engagement" is out for the same reason: a live posting read "Strong,
+# measurable engagement and results across the healthcare partnerships ... in
+# the first 12 months", where it means customer engagement, not a contract.
+_DURATION_CUE = re.compile(
+    r"\b(?:contract|contracts|contracting|term|assignment|assignments|"
+    r"fixed[-\s]?terms?|temporary|temporarily|"
+    r"initial|initially|duration|appointment|appointments|secondment)\b",
+    re.I,
+)
+
+_DURATION_RANGE = re.compile(
+    r"(?:between\s+)?(?P<lo>\d{1,3})\s*(?:-|to|\u2013|and)\s*(?P<hi>\d{1,3})\s*"
+    r"[- ]?\s*(?P<unit>months?|weeks?|wks)\b",
+    re.I,
+)
+_DURATION_UPTO = re.compile(
+    r"up\s+to\s+(?P<hi>\d{1,3})\s*[- ]?\s*(?P<unit>months?|weeks?|wks)\b",
+    re.I,
+)
+_DURATION_MINIMUM = re.compile(
+    r"(?:minimum|at\s+least)\s+(?P<lo>\d{1,3})\s*[- ]?\s*"
+    r"(?P<unit>months?|weeks?|wks)\b",
+    re.I,
+)
+_DURATION_SINGLE = re.compile(
+    r"(?P<n>\d{1,3})\s*[- ]?\s*(?P<unit>months?|weeks?|wks)\b",
     re.I,
 )
 
@@ -459,21 +490,155 @@ _LANGUAGE_CUE = re.compile(
 )
 
 
-def _extract_duration(text: str) -> float | None:
-    """Contract length in months, or ``None`` when no duration is stated."""
-    best: float | None = None
-    for match in _DURATION_MONTHS.finditer(text):
-        months = match.group(1)
-        weeks = match.group(2)
-        if months:
-            value = float(months)
-        elif weeks:
-            value = float(weeks) * 7.0 / 30.44      # weeks -> months, rounded later
+@dataclass(frozen=True)
+class ContractDuration:
+    """A stated contract length, normalized for comparison.
+
+    ``min_months``/``max_months`` are always in months so two durations can be
+    compared; ``unit`` records the unit the posting actually used, because "12
+    week contract" and "3 month contract" describe the same thing in different
+    words and the evidence should stay visible. ``raw`` keeps the matched text.
+
+    A range is preserved rather than collapsed. "3-6 month contract" carries two
+    facts, and picking either one - 3 or 6 - states something the posting did
+    not. Only ``up to``/``minimum`` legitimately supply a single bound.
+    """
+
+    min_months: float | None = None
+    max_months: float | None = None
+    unit: str = "months"
+    raw: str = ""
+    #: True when the value was converted from a non-month unit and therefore
+    #: rounded. "12 week contract" is really 84/30.44 = 2.7595 months; reporting
+    #: 2.8 as a stated duration would present an approximation as an exact
+    #: contractual figure, and a future matcher comparing min_months could act
+    #: on it. Months are stated natively and are never approximate.
+    approximate: bool = False
+
+    @property
+    def is_range(self) -> bool:
+        return (
+            self.min_months is not None
+            and self.max_months is not None
+            and self.min_months != self.max_months
+        )
+
+    def _fmt(self, value: float) -> str:
+        return f"{value:g}"
+
+    def label(self) -> str:
+        """Human-readable form, e.g. ``3-6 months``, ``6 months``, ``up to 24 months``.
+
+        Values are normalized to months, so the label says months even when the
+        posting said weeks; ``unit`` and ``raw`` keep the original wording.
+        """
+        if self.is_range:
+            text = f"{self._fmt(self.min_months)}-{self._fmt(self.max_months)} months"
+        elif self.min_months is None and self.max_months is None:
+            return ""
+        elif self.min_months is None:
+            text = f"up to {self._fmt(self.max_months)} months"
+        elif self.max_months is None:
+            text = f"at least {self._fmt(self.min_months)} months"
         else:
+            text = f"{self._fmt(self.min_months)} months"
+        # "~" keeps a converted, rounded figure from reading as a stated one.
+        return f"~{text}" if self.approximate else text
+
+
+def _extract_duration(text: str) -> "ContractDuration | None":
+    """The stated contract length, or ``None`` when none is stated.
+
+    Every candidate must sit in a sentence that also carries a contract cue.
+    The ungated version matched a bare "N months" anywhere, which on 171 live
+    postings fired six times and got exactly one right: "reached unicorn status
+    in 9 months", "in the first 12 months" and "within 6 months" are company
+    history, onboarding milestones and expectations, not contract lengths.
+    """
+    if not text:
+        return None
+    best: ContractDuration | None = None
+    for sentence in _sentences(text):
+        if not _DURATION_CUE.search(sentence):
             continue
-        if best is None or value > best:
-            best = value
-    return round(best, 1) if best is not None else None
+        found = _duration_in(sentence)
+        if found is None:
+            continue
+        if best is None or _span(found) > _span(best):
+            best = found
+    return best
+
+
+def _span(duration: ContractDuration) -> float:
+    """Ordering key: the upper bound when there is one, else the lower."""
+    for value in (duration.max_months, duration.min_months):
+        if value is not None:
+            return value
+    return 0.0
+
+
+#: Conversion basis for non-month units. Fixed so results are reproducible:
+#: 30.44 is the mean Gregorian month (365.2425 / 12). Named as a constant so it
+#: cannot drift silently. Weeks convert to ``weeks * 7 / _DAYS_PER_MONTH`` and
+#: are then rounded, so a converted duration is an *approximation* and is
+#: flagged as such via :attr:`ContractDuration.approximate`.
+_DAYS_PER_MONTH = 30.44
+
+
+def _to_months(value: float, unit: str) -> float:
+    if unit == "months":
+        return round(value, 1)
+    return round(value * 7.0 / _DAYS_PER_MONTH, 1)
+
+
+def _duration_in(sentence: str) -> "ContractDuration | None":
+    """Parse one contract-flavoured sentence into a :class:`ContractDuration`.
+
+    Each shape keeps only the bound it actually states. "up to 24 months" sets a
+    ceiling and nothing below it; "minimum 6 months" sets a floor. Filling in the
+    missing half would invent a commitment the posting never made.
+    """
+    found = _DURATION_RANGE.search(sentence)
+    if found is not None:
+        unit = _unit_of(found.group("unit"))
+        return _duration_parts(
+            _to_months(float(found.group("lo")), unit),
+            _to_months(float(found.group("hi")), unit),
+            unit, found.group(0),
+        )
+
+    found = _DURATION_UPTO.search(sentence)
+    if found is not None:
+        unit = _unit_of(found.group("unit"))
+        return _duration_parts(
+            None, _to_months(float(found.group("hi")), unit), unit, found.group(0),
+        )
+
+    found = _DURATION_MINIMUM.search(sentence)
+    if found is not None:
+        unit = _unit_of(found.group("unit"))
+        return _duration_parts(
+            _to_months(float(found.group("lo")), unit), None, unit, found.group(0),
+        )
+
+    found = _DURATION_SINGLE.search(sentence)
+    if found is not None:
+        unit = _unit_of(found.group("unit"))
+        months = _to_months(float(found.group("n")), unit)
+        return _duration_parts(months, months, unit, found.group(0))
+    return None
+
+
+def _unit_of(token: str) -> str:
+    return "weeks" if token.lower().startswith(("week", "wk")) else "months"
+
+
+def _duration_parts(minimum, maximum, unit, raw):
+    """Build a duration, flagging any value converted from a non-month unit."""
+    return ContractDuration(
+        min_months=minimum, max_months=maximum, unit=unit, raw=raw,
+        approximate=(unit != "months"),
+    )
 
 
 def _extract_education(text: str) -> str | None:
