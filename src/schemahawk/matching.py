@@ -688,6 +688,15 @@ def _satisfies(job_skills: tuple[str, ...], profile_skills: tuple[str, ...]) -> 
     return tuple(covered)
 
 
+#: Minimum evidence (weighted skill slots) before a technical ratio means
+#: anything. A lone "Python" in a posting divides by one and hands a perfect
+#: 100 to every candidate who happens to have it. Measured on the live corpus:
+#: every technical-100 job sat at ``possible <= 5``, while the genuine Data
+#: Engineering roles sat at ``possible >= 10``. Below the floor the component
+#: stays UNKNOWN rather than guessing.
+MIN_SKILL_EVIDENCE = 4
+
+
 def _score_technical(req: JobRequirements, profile: CandidateProfile) -> tuple[
         int | None, tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Skill coverage: required skills weigh double.
@@ -717,7 +726,13 @@ def _score_technical(req: JobRequirements, profile: CandidateProfile) -> tuple[
 
     earned = 2 * len(matched_req) + len(matched_pref)
     possible = 2 * len(req.required_skills) + len(req.preferred_skills)
-    score = round(100 * earned / possible) if possible else None
+    if possible < MIN_SKILL_EVIDENCE:
+        # Too few named skills to express a coverage ratio. One matched skill
+        # out of one possible is not a 100% match - it is an anecdote. The
+        # evidence lists are still returned so the report can show what was
+        # found, but no number is offered.
+        return None, matched_req, matched_pref, missing_req, missing_pref
+    score = round(100 * earned / possible)
     return score, matched_req, matched_pref, missing_req, missing_pref
 
 
@@ -853,12 +868,23 @@ def _location_acceptable(job_location: str,
 
 # --- public entry point -----------------------------------------------------
 
-def match_job(job: Job, profile: CandidateProfile) -> MatchResult:
+def match_job(job: Job, profile: CandidateProfile,
+              *, min_relevance: int | None = None) -> MatchResult:
     """Match one job against a candidate profile.
 
     Pure and deterministic: same job + same profile always yields the same
     result. An empty profile yields a fully UNKNOWN result rather than a
     zero score, and the V1 ``job.relevance_score`` is never touched.
+
+    ``min_relevance`` is an optional gate. Skill coverage says nothing about
+    whether a posting is the right *kind* of work - measured on the live
+    corpus, "QA Tester Entry Level" and "Developer Advocate" both scored a
+    perfect 100 on skills alone, above every genuine Data Engineering role.
+    Passing a threshold suppresses the overall score for postings below it.
+
+    It defaults to ``None`` so the two scorers stay independent: matching never
+    reads relevance unless a caller explicitly asks it to. The pipeline passes
+    ``settings.min_relevance_score``, which it already applies upstream.
     """
     req = extract_requirements(job, profile)
 
@@ -875,6 +901,21 @@ def match_job(job: Job, profile: CandidateProfile) -> MatchResult:
         (W_CONTRACT, contract),
         (W_ELIGIBILITY, eligibility),
     ))
+
+    if overall is not None and min_relevance is not None:
+        # Imported lazily: ``relevance`` has no knowledge of matching, and
+        # keeping the edge one-directional preserves that separation.
+        from .relevance import score_relevance
+        # ``score_relevance`` assigns ``job.relevance_score`` as a side effect.
+        # Matching is documented never to write the V1 score, so the prior value
+        # is restored around the gate even if scoring raises.
+        prior = job.relevance_score
+        try:
+            below_threshold = score_relevance(job) < min_relevance
+        finally:
+            job.relevance_score = prior
+        if below_threshold:
+            overall = None
 
     conflict = hard_ineligibility_reason(
         job,

@@ -315,6 +315,20 @@ def assess(job: Job) -> EligibilityProfile:
     # --- location scope ---
     scope = LocationScope.UNKNOWN
     marker = grab(_WORLDWIDE)
+    if marker is not None and authz in (
+        WorkAuthorization.CITIZENSHIP_REQUIRED,
+        WorkAuthorization.CLEARANCE_REQUIRED,
+        WorkAuthorization.WORK_AUTHORIZATION_REQUIRED,
+    ):
+        # An explicit citizenship/authorization requirement contradicts a
+        # "global team" phrasing. Real postings mix them ("because this role
+        # supports the U.S. government business... must be a U.S. citizen"),
+        # and reporting WORLDWIDE alongside a hard restriction described one
+        # job as both open to everyone and closed to most. The explicit
+        # requirement is the stronger signal, so it wins and the worldwide
+        # marker is dropped. The evidence tuple keeps it, so a report can
+        # still show the phrasing that was overridden.
+        marker = None
     if marker is not None:
         scope = LocationScope.WORLDWIDE
     elif _PLACE_ONLY.search(text) or _AUTHORIZED_PLACE.search(text):

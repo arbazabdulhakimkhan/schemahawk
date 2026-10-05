@@ -469,3 +469,38 @@ def test_matching_surfaces_the_conflict_on_the_match_result():
 def test_match_result_has_no_conflict_when_candidate_is_unknown():
     result = match_job(make_job(description="US citizens only."), profile())
     assert result.eligibility_conflict is None
+def test_explicit_citizenship_overrides_a_worldwide_claim():
+    """A hard requirement must not be reported as open to everyone.
+
+    Real postings mix the two: "because this role supports the U.S. government
+    business, it is required that this candidate be a U.S. citizen ... holds
+    active security clearance". Reporting WORLDWIDE alongside that describes one
+    job as both open to everyone and closed to most.
+    """
+    result = assess(make_job(
+        description=("We serve a global team. Because this role supports the "
+                     "U.S. government business, it is required that this "
+                     "candidate be a U.S. citizen who holds active security "
+                     "clearance."),
+    ))
+    assert result.scope != LocationScope.WORLDWIDE
+    assert result.work_authorization in (
+        WorkAuthorization.CITIZENSHIP_REQUIRED,
+        WorkAuthorization.CLEARANCE_REQUIRED,
+    )
+
+
+def test_worldwide_still_wins_when_no_requirement_is_stated():
+    """The override must not weaken an unqualified worldwide posting."""
+    result = assess(make_job(description="Fully remote, worldwide team, "
+                                         "candidates from anywhere."))
+    assert result.scope == LocationScope.WORLDWIDE
+    assert result.work_authorization == WorkAuthorization.UNKNOWN
+
+
+def test_work_authorization_requirement_also_overrides_worldwide():
+    result = assess(make_job(description="Global team. You must be authorized "
+                                         "to work in the United States."))
+    assert result.scope != LocationScope.WORLDWIDE
+    assert result.work_authorization == (
+        WorkAuthorization.WORK_AUTHORIZATION_REQUIRED)

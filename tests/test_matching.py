@@ -42,9 +42,12 @@ def profile(**kwargs) -> CandidateProfile:
 # --- skill matching ---------------------------------------------------------
 
 def test_exact_skill_match():
-    result = match_job(job(description="We use Python daily."),
-                       profile(skills=["Python"]))
-    assert result.matched_preferred == ("Python",)
+    result = match_job(
+        job(description="We use Python, Snowflake, Databricks and Power Query "
+                       "daily."),
+        profile(skills=["Python", "Snowflake", "Databricks", "Power Query"]),
+    )
+    assert "Python" in result.matched_preferred
     assert result.technical_score == 100
 
 
@@ -61,14 +64,17 @@ def test_skill_match_respects_token_boundaries():
     as its own skill, so the job reports a real (missing) requirement rather
     than nothing - the boundary rule is what keeps ``SQL`` out of the match.
     """
-    result = match_job(job(description="PostgreSQL and Microsoft support."),
-                       profile(skills=["SQL"]))
+    result = match_job(
+        job(description="PostgreSQL, Snowflake, Databricks and Tableau "
+                       "Desktop required."),
+        profile(skills=["SQL"]),
+    )
     # The boundary rule holds: "SQL" is not satisfied by "PostgreSQL".
     assert "SQL" not in result.matched_preferred
     # PostgreSQL is now recognized as a job requirement the candidate lacks:
     # nothing matched, and the gap is reported instead of being invisible.
     assert result.matched_preferred == ()
-    assert result.missing_preferred == ("PostgreSQL",)
+    assert "PostgreSQL" in result.missing_required
     assert result.technical_score == 0
 
 
@@ -353,10 +359,14 @@ def test_all_required_skills_missing_scores_zero():
 
 
 def test_all_preferred_skills_missing_scores_zero():
-    result = match_job(job(description="Nice to have: Power BI, Tableau Desktop."),
-                       profile(skills=["Python"]))
+    result = match_job(
+        job(description="Nice to have: Power BI, Tableau Desktop, Snowflake, "
+                       "Databricks."),
+        profile(skills=["Python"]),
+    )
     assert result.technical_score == 0
-    assert set(result.missing_preferred) == {"Power BI", "Tableau Desktop"}
+    assert set(result.missing_preferred) == {
+        "Power BI", "Tableau Desktop", "Snowflake", "Databricks"}
 
 
 def test_partial_required_coverage_halves_the_score():
@@ -536,8 +546,11 @@ def test_explicit_experience_requirement_failed_scores_zero():
 def test_single_known_component_yields_no_overall_score():
     """Only technical is knowable; the total must not masquerade as a verdict."""
     result = match_job(
-        job(title="Engineer", description="You will use SQL daily."),
-        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+        job(title="Engineer",
+            description="You will use SQL, Python, Databricks and Snowflake "
+                        "daily."),
+        profile(total_years_experience=7, seniority="senior",
+                skills=["SQL", "Python", "Databricks", "Snowflake"]),
     )
     assert result.technical_score == 100
     assert result.overall_score is None
@@ -545,8 +558,11 @@ def test_single_known_component_yields_no_overall_score():
 
 def test_two_known_components_do_emit_an_overall_score():
     result = match_job(
-        job(title="Senior Engineer", description="You will use SQL daily."),
-        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+        job(title="Senior Engineer",
+            description="You will use SQL, Python, Databricks and Snowflake "
+                        "daily."),
+        profile(total_years_experience=7, seniority="senior",
+                skills=["SQL", "Python", "Databricks", "Snowflake"]),
     )
     assert result.technical_score == 100
     assert result.experience_score == 100
@@ -1100,3 +1116,102 @@ def _to_months_for_test(weeks):
     from schemahawk.matching import _to_months
 
     return _to_months(weeks, "weeks")
+# --- Phase 2D: ranking & decision quality -----------------------------------
+#
+# Measured on 171 live postings, the technical ratio divided by whatever the
+# posting happened to name. One lone "Python" gave a perfect 100, which put
+# "QA Tester Entry Level" and "Developer Advocate" above every genuine Data
+# Engineering role. These tests pin the evidence floor and the relevance gate.
+
+
+def test_single_named_skill_yields_no_technical_score():
+    """One matched skill out of one possible is an anecdote, not a 100%."""
+    result = match_job(
+        job(description="We use Python daily."),
+        profile(skills=["Python"]),
+    )
+    assert result.technical_score is None
+    # The evidence is still reported, only the number is withheld.
+    assert result.matched_preferred == ("Python",)
+
+
+def test_thin_evidence_never_reports_a_perfect_technical_score():
+    """Whatever the posting names, too little of it cannot produce a 100."""
+    for description, skills in [
+        ("Nice to have: Python.", ["Python"]),
+        ("Python and Snowflake.", ["Python", "Snowflake"]),
+        ("Python, Snowflake and Databricks.", ["Python", "Snowflake", "Databricks"]),
+    ]:
+        result = match_job(job(description=description), profile(skills=skills))
+        assert result.technical_score is None, description
+
+
+def test_sufficient_evidence_still_scores():
+    """The floor withholds a number only when the evidence is too thin."""
+    result = match_job(
+        job(description="We use Python, Snowflake, Databricks and Power Query."),
+        profile(skills=["Python", "Snowflake", "Databricks", "Power Query"]),
+    )
+    assert result.technical_score == 100
+
+
+def test_relevance_gate_suppresses_overall_score():
+    """A well-matched posting of the wrong kind gets no confident verdict."""
+    posting = job(
+        title="QA Tester Entry Level",
+        description="We use Python, Snowflake, Databricks and Power Query.",
+    )
+    candidate = profile(total_years_experience=7, seniority="senior",
+                        skills=["Python", "Snowflake", "Databricks", "Power Query"])
+    assert match_job(posting, candidate).overall_score is not None
+    assert match_job(posting, candidate, min_relevance=60).overall_score is None
+
+
+def test_relevance_gate_keeps_a_relevant_posting_scored():
+    posting = job(
+        title="Senior Data Engineer",
+        description="We use Python, Snowflake, Databricks and Power Query.",
+    )
+    candidate = profile(total_years_experience=7, seniority="senior",
+                        skills=["Python", "Snowflake", "Databricks", "Power Query"])
+    result = match_job(posting, candidate, min_relevance=60)
+    assert result.overall_score is not None
+
+
+def test_relevance_gate_is_opt_in():
+    """Passing a threshold is what engages the gate; omitting it does nothing."""
+    posting = job(
+        title="QA Tester Entry Level",
+        description="We use Python, Snowflake, Databricks and Power Query.",
+    )
+    candidate = profile(total_years_experience=7, seniority="senior",
+                        skills=["Python", "Snowflake", "Databricks", "Power Query"])
+    assert match_job(posting, candidate).overall_score is not None
+    assert match_job(posting, candidate, min_relevance=60).overall_score is None
+
+
+def test_relevance_gate_leaves_components_visible():
+    """Gating hides the verdict, not the evidence behind it."""
+    posting = job(
+        title="QA Tester Entry Level",
+        description="We use Python, Snowflake, Databricks and Power Query.",
+    )
+    candidate = profile(total_years_experience=7, seniority="senior",
+                        skills=["Python", "Snowflake", "Databricks", "Power Query"])
+    result = match_job(posting, candidate, min_relevance=60)
+    assert result.overall_score is None
+    # The title itself names "QA", so the candidate does not match everything;
+    # the point is that a number is still reported rather than gated away.
+    assert result.technical_score is not None
+    assert len(result.explanation) > 0
+
+
+def test_gate_never_writes_to_the_v1_relevance_score():
+    posting = job(
+        title="QA Tester Entry Level",
+        description="We use Python, Snowflake, Databricks and Power Query.",
+    )
+    candidate = profile(total_years_experience=7, seniority="senior",
+                        skills=["Python", "Snowflake", "Databricks", "Power Query"])
+    match_job(posting, candidate, min_relevance=60)
+    assert posting.relevance_score is None

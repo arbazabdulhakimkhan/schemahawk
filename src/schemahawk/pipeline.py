@@ -163,7 +163,13 @@ def _discover(settings, report, store, *, now, only_source, force, since_minutes
     # Candidate matching is additive and always runs on the strong candidates
     # only. It never alters relevance_score, quality or status, and an empty
     # profile simply yields UNKNOWN components instead of numbers.
-    report.matches = [(job, match_job(job, profile)) for job in strong]
+    #
+    # The relevance threshold is passed through as a gate so a match score can
+    # never stand on its own for a posting that is not the right kind of work.
+    report.matches = [
+        (job, match_job(job, profile, min_relevance=threshold))
+        for job in strong
+    ]
 
     report.stored_inserted, report.stored_updated = store.upsert_jobs(unique)
     report.completed_at = datetime.now(timezone.utc)
