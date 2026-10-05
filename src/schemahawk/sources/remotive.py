@@ -11,7 +11,7 @@ to confidence 95 (exact but tz-naive).
 """
 from __future__ import annotations
 
-from ..models import CONTRACT, FULL_TIME, PART_TIME, Job
+from ..models import Job, normalize_contract_type
 from ..normalize import clean_text, parse_compensation, parse_timestamp, strip_html
 from .base import BaseSource
 
@@ -51,15 +51,9 @@ def _to_job(source: RemotiveSource, entry: object) -> Job | None:
     raw = entry.get("publication_date")
     posted_at, confidence = parse_timestamp(raw) if raw else (None, None)
 
-    job_type = str(entry.get("job_type") or "").strip().lower()
-    if job_type in ("freelance", "contract", "contractor"):
-        contract_type = CONTRACT
-    elif job_type == "part_time":
-        contract_type = PART_TIME
-    elif job_type in ("full_time", "full-time"):
-        contract_type = FULL_TIME
-    else:
-        contract_type = None
+    # Remotive publishes its own ``job_type``; normalize it so FREELANCE is no
+    # longer collapsed into CONTRACT (which loses a real distinction).
+    contract_type = normalize_contract_type(entry.get("job_type"))
 
     location = clean_text(entry.get("candidate_required_location"), 160)
     remote = True if location and "worldwide" in location.lower() else (

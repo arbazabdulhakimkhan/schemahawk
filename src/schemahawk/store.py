@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     compensation_currency TEXT,
     compensation_period TEXT,
     compensation_raw TEXT,
+    location_scope TEXT,
+    work_authorization_level TEXT,
     quality_status TEXT,
     eligibility_status TEXT,
     relevance_score INTEGER,
@@ -114,6 +116,7 @@ INSERT INTO jobs (
     recruiter_url, contact_email, country, timezone, work_authorization,
     compensation_min, compensation_max, compensation_currency,
     compensation_period, compensation_raw,
+    location_scope, work_authorization_level,
     quality_status, eligibility_status, relevance_score, rejection_reason,
     status, created_at, updated_at
 ) VALUES (
@@ -124,6 +127,7 @@ INSERT INTO jobs (
     :recruiter_url, :contact_email, :country, :timezone, :work_authorization,
     :compensation_min, :compensation_max, :compensation_currency,
     :compensation_period, :compensation_raw,
+    :location_scope, :work_authorization_level,
     :quality_status, :eligibility_status, :relevance_score, :rejection_reason,
     :status, :created_at, :updated_at
 )
@@ -139,6 +143,8 @@ _ADDED_COLUMNS: dict[str, str] = {
     "compensation_currency": "TEXT",
     "compensation_period": "TEXT",
     "compensation_raw": "TEXT",
+    "location_scope": "TEXT",
+    "work_authorization_level": "TEXT",
 }
 
 
@@ -389,6 +395,8 @@ def _job_row(job: Job, now: str) -> dict:
         "compensation_currency": _comp(job, "currency"),
         "compensation_period": _comp(job, "period"),
         "compensation_raw": _comp(job, "raw"),
+        "location_scope": job.location_scope,
+        "work_authorization_level": job.work_authorization_level,
         "quality_status": job.quality_status,
         "eligibility_status": job.eligibility_status,
         "relevance_score": job.relevance_score,

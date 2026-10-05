@@ -10,6 +10,7 @@ Rules from the blueprint that this module enforces:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -51,10 +52,99 @@ class PipelineStatus:
     MATCHED = "MATCHED"
 
 
-# Contract-type vocabulary (kept small and explicit; None means "unknown").
+# --- contract-type vocabulary ------------------------------------------------
+#
+# Phase 2B normalization. V1 stored only CONTRACT / PART_TIME / FULL_TIME /
+# None, so three values that boards actually publish - freelance, temporary and
+# internship - were silently discarded, and "permanent" was never
+# distinguishable from "full-time". The same ``contract_type`` column is reused;
+# no new column is introduced. ``None`` still means "the source did not say".
+PERMANENT = "PERMANENT"
 CONTRACT = "CONTRACT"
 PART_TIME = "PART_TIME"
 FULL_TIME = "FULL_TIME"
+FREELANCE = "FREELANCE"
+TEMPORARY = "TEMPORARY"
+INTERNSHIP = "INTERNSHIP"
+VOLUNTEER = "VOLUNTEER"
+
+CONTRACT_TYPES: tuple[str, ...] = (
+    PERMANENT, FULL_TIME, PART_TIME, CONTRACT, FREELANCE, TEMPORARY,
+    INTERNSHIP, VOLUNTEER,
+)
+
+# Board labels -> normalized value. Source-specific spellings ("part_time",
+# "Part-Time", "contractor") collapse onto one vocabulary so a stored value
+# means the same thing whichever adapter produced it.
+CONTRACT_TYPE_ALIASES: dict[str, str] = {
+    "permanent": PERMANENT, "perm": PERMANENT, "full time": FULL_TIME,
+    "full_time": FULL_TIME, "fulltime": FULL_TIME, "full-time": FULL_TIME,
+    "part time": PART_TIME, "part_time": PART_TIME, "parttime": PART_TIME,
+    "part-time": PART_TIME,
+    "contract": CONTRACT, "contractor": CONTRACT, "contract position": CONTRACT,
+    "freelance": FREELANCE, "independent contractor": FREELANCE,
+    "freelancer": FREELANCE,
+    "temporary": TEMPORARY, "temp": TEMPORARY,
+    "internship": INTERNSHIP, "intern": INTERNSHIP, "trainee": INTERNSHIP,
+    "volunteer": VOLUNTEER, "unpaid": VOLUNTEER,
+}
+
+
+# Compound-label fallback, most specific first. A label naming several concepts
+# resolves to the one that carries the most information: "freelance contract" is
+# FREELANCE, "part-time contract" is PART_TIME, "senior contract" is CONTRACT.
+# Token boundaries prevent "temp" matching inside "contemporary".
+_CONTRACT_FALLBACK: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(rf"(?<!\w)(?:{fragment})(?!\w)", re.I), value)
+    for fragment, value in (
+        (r"freelance|freelancer|independent\s+contractor", FREELANCE),
+        (r"internship|intern|trainee", INTERNSHIP),
+        (r"volunteer|unpaid", VOLUNTEER),
+        (r"temporary|temp", TEMPORARY),
+        (r"part[\s_-]?time", PART_TIME),
+        (r"full[\s_-]?time", FULL_TIME),
+        (r"permanent|perm", PERMANENT),
+        (r"contractor|contract", CONTRACT),
+    )
+)
+
+
+def normalize_contract_type(raw: object) -> str | None:
+    """Map a board-supplied contract label onto the normalized vocabulary.
+
+    Returns ``None`` when the label is absent or unrecognized - silence is
+    never turned into "permanent". Where a source uses a fixed-hours label
+    (``full_time``) it is kept as ``FULL_TIME`` rather than being upgraded to
+    ``PERMANENT``, because "permanent" is an employment relationship, not an
+    hours commitment.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raw = str(raw)
+    key = raw.strip().lower()
+    if not key:
+        return None
+
+    # Exact alias wins: it is the most precise answer when it exists.
+    exact = CONTRACT_TYPE_ALIASES.get(key)
+    if exact is not None:
+        return exact
+
+    # Compound labels ("temporary contract", "part-time contract",
+    # "contract (freelance)") miss the alias table. The previous ad-hoc
+    # substring checks in the adapters used to catch these and return
+    # CONTRACT; an exact-only lookup silently returned ``None`` and threw the
+    # information away. The fallback below restores that coverage while
+    # preferring the more specific concept, so "part-time contract" becomes
+    # PART_TIME and "contract (freelance)" becomes FREELANCE rather than both
+    # collapsing into CONTRACT. Order is fixed and most-specific-first, and
+    # every fragment is matched on token boundaries so "temp" never matches
+    # inside "contemporary".
+    for pattern, value in _CONTRACT_FALLBACK:
+        if pattern.search(key):
+            return value
+    return None
 
 # --- compensation vocabulary -----------------------------------------------
 # Several job boards publish pay, and several report it differently. These
@@ -126,6 +216,17 @@ class Job:
     country: str | None = None
     timezone: str | None = None
     work_authorization: str | None = None
+
+    # --- normalized eligibility axes (Phase 2B) ---
+    # ``work_authorization`` above is the human-readable reason shown in
+    # reports. The two fields below are the machine-readable, normalized
+    # values and are deliberately separate from each other:
+    #   location_scope          -> geography (see eligibility.LocationScope)
+    #   work_authorization_level -> work-authorization law/rule
+    # Citizenship is NEVER inferred from location, and neither axis is ever
+    # inferred from ``remote``. Absence of evidence stays UNKNOWN.
+    location_scope: str | None = None
+    work_authorization_level: str | None = None
 
     # --- pipeline-computed dedup keys (not from the source) ---
     url_canonical: str | None = None

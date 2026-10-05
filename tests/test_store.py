@@ -1,12 +1,114 @@
 """SQLite store tests: schema, upsert semantics, run records, read-only mode."""
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
+from schemahawk.quality import classify
 from schemahawk.report import RunReport
 from schemahawk.store import Store, iso_utc
 
 from conftest import NOW, make_job
+
+_NEW_COLUMNS = ("location_scope", "work_authorization_level")
+
+
+def _columns(db_path):
+    with sqlite3.connect(db_path) as con:
+        return {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
+
+
+def test_eligibility_axes_round_trip_to_the_database(tmp_path):
+    """Both normalized axes must survive a write/read cycle.
+
+    ``work_authorization`` (the human-readable reason) and
+    ``work_authorization_level`` (the normalized enum) are different columns on
+    purpose; storing only one of them loses the distinction the model exists for.
+    """
+    db = str(tmp_path / "axes.db")
+    job = make_job(description="US citizens only.")
+    classify(job)
+    with Store(db) as store:
+        store.upsert_jobs([job])
+
+    with sqlite3.connect(db) as con:
+        row = con.execute(
+            "SELECT location_scope, work_authorization_level, work_authorization"
+            " FROM jobs"
+        ).fetchone()
+    assert row == ("COUNTRY_RESTRICTED", "CITIZENSHIP_REQUIRED", "citizenship required")
+
+
+def test_unknown_axes_persist_as_the_string_unknown_not_null(tmp_path):
+    """Silence must be visible as UNKNOWN rather than collapsing to NULL."""
+    db = str(tmp_path / "unknown.db")
+    job = make_job()
+    classify(job)
+    with Store(db) as store:
+        store.upsert_jobs([job])
+    with sqlite3.connect(db) as con:
+        row = con.execute(
+            "SELECT location_scope, work_authorization_level FROM jobs"
+        ).fetchone()
+    assert row == ("UNKNOWN", "UNKNOWN")
+
+
+def test_migration_adds_both_eligibility_columns(tmp_path):
+    """A database created before Phase 2B must gain both columns, not just one.
+
+    ``CREATE TABLE IF NOT EXISTS`` silently leaves an existing table alone, so an
+    old file would keep working right up until an INSERT named a missing column.
+    """
+    db = str(tmp_path / "legacy.db")
+    with Store(db):
+        pass
+    with sqlite3.connect(db) as con:
+        stamp = "2026-01-01T00:00:00+00:00"
+        con.execute(
+            "INSERT INTO jobs (id, source, title, discovered_at, created_at, updated_at)"
+            " VALUES ('1', 'remoteok', 'old row', ?, ?, ?)",
+            (stamp, stamp, stamp),
+        )
+        for column in _NEW_COLUMNS:
+            con.execute(f"ALTER TABLE jobs DROP COLUMN {column}")
+    assert not _columns(db) & set(_NEW_COLUMNS)
+
+    with Store(db):
+        pass
+    assert _NEW_COLUMNS[0] in _columns(db)
+    assert _NEW_COLUMNS[1] in _columns(db)
+
+
+def test_migration_is_idempotent(tmp_path):
+    db = str(tmp_path / "idem.db")
+    with Store(db):
+        pass
+    before = len(_columns(db))
+    with Store(db):
+        pass
+    with Store(db):
+        pass
+    assert len(_columns(db)) == before
+
+
+def test_migration_preserves_existing_rows(tmp_path):
+    db = str(tmp_path / "rows.db")
+    with Store(db):
+        pass
+    with sqlite3.connect(db) as con:
+        stamp = "2026-01-01T00:00:00+00:00"
+        con.execute(
+            "INSERT INTO jobs (id, source, title, discovered_at, created_at, updated_at)"
+            " VALUES ('keep-me', 'remoteok', 'old row', ?, ?, ?)",
+            (stamp, stamp, stamp),
+        )
+        for column in _NEW_COLUMNS:
+            con.execute(f"ALTER TABLE jobs DROP COLUMN {column}")
+    with Store(db):
+        pass
+    with sqlite3.connect(db) as con:
+        assert con.execute("SELECT title FROM jobs").fetchone() == ("old row",)
 
 
 def test_schema_and_empty_reads():

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 
+from .eligibility import EligibilityProfile, LocationScope, WorkAuthorization, assess
 from .models import EligibilityStatus, Job, PipelineStatus, QualityStatus
 
 _HARD_SCAM: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -52,38 +53,27 @@ _SOFT_SUSPICIOUS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bsign\s?up\s+bonus\b", re.I), "signup bonus"),
 )
 
-_ELIGIBILITY: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(r"\bUS\b.{0,12}\bcitizens?(?:hip)?\b.{0,20}\b(?:only|required|must)\b", re.I),
-        "US citizenship required",
-    ),
-    (re.compile(r"\bcitizenship\s+(?:is\s+)?required\b", re.I), "citizenship required"),
-    (re.compile(r"\bsecurity\s+clearance\b", re.I), "security clearance required"),
-    (re.compile(r"\bno\s+(?:visa\s+)?sponsorship\b", re.I), "no visa sponsorship"),
-    (
-        re.compile(
-            r"\b(?:US|USA|U\.S\.|United States|UK|United Kingdom|Canadian|EU|European|Australian)"
-            r"\s+(?:citizens|nationals|residents|persons)\s+only\b",
-            re.I,
-        ),
-        "citizenship/residency restriction",
-    ),
-    (
-        re.compile(
-            r"\bmust\s+be\s+(?:authorized|eligible)\s+to\s+work\s+in\s+(?:the\s+)?"
-            r"(?:US|USA|United States|UK|United Kingdom|Canada|Australia|EU)\b",
-            re.I,
-        ),
-        "explicit work-authorization requirement",
-    ),
-)
+# The eligibility patterns moved to ``eligibility.assess()`` in Phase 2B. The
+# old hand-rolled set here only knew nine countries and no EU work-authorization
+# phrasing, so postings such as "EU candidates only" or "must be authorized to
+# work in Germany" silently evaluated to UNKNOWN. The two mappings below turn the
+# normalized enums back into the human-readable reasons that appear in reports.
+_AUTHORIZATION_REASON: dict[WorkAuthorization, str | None] = {
+    WorkAuthorization.UNKNOWN: None,
+    WorkAuthorization.NOT_STATED: None,
+    WorkAuthorization.OPEN: None,
+    WorkAuthorization.WORK_AUTHORIZATION_REQUIRED: "explicit work-authorization requirement",
+    WorkAuthorization.CITIZENSHIP_REQUIRED: "citizenship required",
+}
 
-_LOCATION_ONLY = re.compile(
-    r"\b(?:US|USA|U\.S\.|United States|UK|United Kingdom|Canada|Australia|EU|Europe|India|Germany)"
-    r"\s*[-\u2013]?\s+only\b",
-    re.I,
-)
-_WORLDWIDE = re.compile(r"\b(?:worldwide|anywhere|any\s+location|global)\b", re.I)
+_SCOPE_REASON: dict[LocationScope, str | None] = {
+    LocationScope.UNKNOWN: None,
+    # Only an *explicit* worldwide statement means worldwide. "Remote" does not.
+    LocationScope.WORLDWIDE: None,
+    LocationScope.COUNTRY_RESTRICTED: "location restricted to a single country",
+    LocationScope.REGION_RESTRICTED: "location restricted to a region",
+    LocationScope.TIMEZONE_RESTRICTED: "timezone-restricted working hours",
+}
 
 
 def _searchable(job: Job) -> str:
@@ -111,29 +101,39 @@ def classify(job: Job, *, reject_restricted: bool = True) -> Job:
             job.work_authorization = None
             break
 
-    restriction = _find_restriction(text, job.location)
-    if restriction is not None:
+    profile = assess(job)
+    job.location_scope = profile.scope.name
+    job.work_authorization_level = profile.work_authorization.name
+
+    reason = _restriction_reason(profile)
+    if reason is not None:
         job.eligibility_status = EligibilityStatus.RESTRICTED
-        job.work_authorization = restriction
+        job.work_authorization = reason
         if reject_restricted:
-            job.rejection_reason = f"eligibility: {restriction}"
+            job.rejection_reason = f"eligibility: {reason}"
             job.status = PipelineStatus.REJECTED
         return job
 
+    # Only an explicitly worldwide posting counts as eligible. Previously this
+    # branch fired for any remote job, which claimed eligibility from evidence
+    # that does not exist -- 84% of remote postings never say "worldwide".
     job.eligibility_status = (
         EligibilityStatus.ELIGIBLE
-        if job.remote is True or (job.location and _WORLDWIDE.search(job.location))
+        if profile.scope is LocationScope.WORLDWIDE
         else EligibilityStatus.UNKNOWN
     )
     return job
 
 
-def _find_restriction(text: str, location: str | None) -> str | None:
-    for pattern, label in _ELIGIBILITY:
-        if pattern.search(text):
-            return label
-    if location and _LOCATION_ONLY.search(location):
-        return "location restricted to a single country"
-    if text and _LOCATION_ONLY.search(text):
-        return "location restricted to a single country"
-    return None
+def _restriction_reason(profile: EligibilityProfile) -> str | None:
+    """Human-readable restriction reason, or None when nothing is restricted.
+
+    The work-authorization axis wins when present because it is the stronger
+    constraint: "US citizens only" is more informative than "US only".
+    """
+    reason = _AUTHORIZATION_REASON.get(profile.work_authorization)
+    if reason is None:
+        reason = _SCOPE_REASON.get(profile.scope)
+    if reason is None and profile.work_authorization is WorkAuthorization.OPEN:
+        return None
+    return reason

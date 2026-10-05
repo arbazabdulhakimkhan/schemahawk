@@ -7,7 +7,7 @@ map to confidence 100. The API caps ``count`` at 50.
 """
 from __future__ import annotations
 
-from ..models import CONTRACT, FULL_TIME, PART_TIME, Job
+from ..models import Job, normalize_contract_type
 from ..normalize import clean_text, parse_compensation, parse_timestamp, strip_html
 from .base import BaseSource
 
@@ -39,14 +39,14 @@ def _to_job(source: JobicySource, entry: object) -> Job | None:
     posted_at, confidence = parse_timestamp(raw) if raw else (None, None)
 
     types = [t.lower() for t in (entry.get("jobType") or []) if isinstance(t, str)]
-    if any("contract" in t or "freelance" in t for t in types):
-        contract_type = CONTRACT
-    elif any("part-time" in t or "part time" in t for t in types):
-        contract_type = PART_TIME
-    elif any("full-time" in t or "full time" in t for t in types):
-        contract_type = FULL_TIME
-    else:
-        contract_type = None
+    # Contract taxonomy (Phase 2B): freelance used to be collapsed into
+    # CONTRACT. normalize_contract_type maps the board's own labels onto the
+    # shared vocabulary so "freelance" -> FREELANCE, not CONTRACT.
+    contract_type = None
+    for label in types:
+        contract_type = normalize_contract_type(label)
+        if contract_type is not None:
+            break
 
     geo = clean_text(entry.get("jobGeo"), 160)
     remote = True if geo and any(

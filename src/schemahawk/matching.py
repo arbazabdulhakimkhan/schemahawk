@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from .models import Job
 from .profile import CandidateProfile
+from .eligibility import LocationScope
 from .skills import DEFAULT_VOCABULARY, alias_map, canonical_names, vocabulary_for
 from .textmatch import matched_phrases, matcher_for_phrase
 
@@ -122,6 +123,15 @@ class JobRequirements:
     contract_types: tuple[str, ...] = ()
     remote_requirement: str | None = None
     location_restriction: str | None = None
+
+    # --- Phase 2B additions -------------------------------------------------
+    # All are optional and default to "not stated". Silence is never turned into
+    # "no requirement": an absent education or language field means the posting
+    # did not mention one, not that none is needed.
+    contract_duration_months: float | None = None
+    education_level: str | None = None      # bachelors | masters | doctorate | equivalent_experience
+    languages_required: tuple[str, ...] = ()
+    timezone_requirement: str | None = None
 
     @property
     def has_skill_signal(self) -> bool:
@@ -238,6 +248,10 @@ def extract_requirements(job: Job, profile: CandidateProfile) -> JobRequirements
         contract_types=contract_types,
         remote_requirement=remote,
         location_restriction=(job.location or None),
+        contract_duration_months=_extract_duration(text),
+        education_level=_extract_education(text),
+        languages_required=_extract_languages(text),
+        timezone_requirement=_timezone_requirement(job),
     )
 
 
@@ -284,6 +298,115 @@ def _extract_remote(text: str) -> str | None:
     if _REMOTE_TERMS.search(text):
         return "remote"
     return None
+
+
+# --- Phase 2B: duration / education / language ------------------------------
+#
+# Timezone requirements are derived from the eligibility pass rather than
+# re-patterned, so the ``TIMEZONE_RESTRICTED`` scope and this field can never
+# disagree with each other.
+def _timezone_requirement(job: Job) -> str | None:
+    """The timezone the posting constrains work to, or ``None`` when unstated.
+
+    Derived from the eligibility pass rather than re-patterned, so the
+    ``TIMEZONE_RESTRICTED`` scope and this field can never disagree. Only an
+    explicit constraint is reported: "flexible hours, any timezone" stays
+    ``None`` rather than becoming a requirement that does not exist.
+    """
+    from .eligibility import assess as _assess
+    from .eligibility import timezone_constraint as _zone
+
+    if _assess(job).scope is not LocationScope.TIMEZONE_RESTRICTED:
+        return None
+    return _zone(_searchable(job))
+
+# These patterns are deliberately narrow. Live job text contains "degree of
+# autonomy", "master modern approaches" and "master setup", so a bare "degree"
+# or "master" must never be treated as an education requirement.
+_DURATION_MONTHS = re.compile(
+    r"\b(?:for\s+|initial\s+|term\s+of\s+)?(\d{1,2})\s*[- ]?\s*months?\b"
+    r"|\b(?:initial\s+)?(\d{1,3})\s*[- ]?\s*(?:week|wks)s?\s+(?:contract|term|assignment)\b",
+    re.I,
+)
+
+# "degree" only counts when it is a qualification: "... degree", "degree in X",
+# "bachelor's degree". "degree of autonomy" must not match.
+_EDUCATION = (
+    ("doctorate", re.compile(
+        r"\b(?:ph\.?d|doctorate|doctoral)\b[^.]{0,30}\b(?:required|degree)\b"
+        r"|\b(?:required|preferred)\b[^.]{0,30}\b(?:ph\.?d|doctorate)\b", re.I)),
+    ("masters", re.compile(
+        r"\bmaster(?:'s|')?\s+(?:degree|of\s+science|of\s+arts)\b"
+        r"|\bmsc\b[^.]{0,25}\bdegree\b"
+        r"|\b(?:required|preferred)\b[^.]{0,40}\bmaster(?:'s|')?\s+degree\b", re.I)),
+    ("bachelors", re.compile(
+        r"\bbachelor(?:'s|')?\s+(?:degree|of\s+science|of\s+arts)\b"
+        r"|\bb\.?s\.?c\b"
+        r"|\b(?:required|preferred)\b[^.]{0,40}\bbachelor(?:'s|')?\b", re.I)),
+    # "degree or equivalent practical experience" - a real, common hedge.
+    ("equivalent_experience", re.compile(
+        r"\bdegree\b[^.]{0,30}\bor\s+equivalent\b", re.I)),
+)
+
+# Languages named as a requirement. "English" only counts with a requirement
+# or proficiency cue nearby.
+_LANGUAGES: tuple[str, ...] = (
+    "English", "German", "French", "Spanish", "Italian", "Portuguese",
+    "Dutch", "Polish", "Swedish", "Danish", "Norwegian", "Finnish",
+    "Hindi", "Mandarin", "Chinese", "Japanese", "Korean", "Arabic",
+    "Russian", "Ukrainian", "Turkish",
+)
+_LANGUAGE_CUE = re.compile(
+    r"\brequired\b|\bpreferred\b|\bmust\b|\bfluent\b|\bnative\b|\bproficient\b"
+    r"|\bworking\s+knowledge\b|\bintermediate\b|\badvanced\b",
+    re.I,
+)
+
+
+def _extract_duration(text: str) -> float | None:
+    """Contract length in months, or ``None`` when no duration is stated."""
+    best: float | None = None
+    for match in _DURATION_MONTHS.finditer(text):
+        months = match.group(1)
+        weeks = match.group(2)
+        if months:
+            value = float(months)
+        elif weeks:
+            value = float(weeks) * 7.0 / 30.44      # weeks -> months, rounded later
+        else:
+            continue
+        if best is None or value > best:
+            best = value
+    return round(best, 1) if best is not None else None
+
+
+def _extract_education(text: str) -> str | None:
+    """Highest qualification level stated, or ``None``.
+
+    Ordered so a doctorate beats a masters beats a bachelors, and an
+    "equivalent experience" hedge is only reported when it appears.
+    """
+    for level, pattern in _EDUCATION:
+        if pattern.search(text):
+            return level
+    return None
+
+
+def _extract_languages(text: str) -> tuple[str, ...]:
+    """Languages named alongside a requirement/proficiency cue.
+
+    A bare mention ("our team speaks Spanish") is not a requirement, so the
+    cue must appear in the same clause.
+    """
+    found: list[str] = []
+    for clause in _sentences(text):
+        if not _LANGUAGE_CUE.search(clause):
+            continue
+        for language in _LANGUAGES:
+            if re.search(rf"(?<!\w){re.escape(language)}(?!\w)", clause, re.I):
+                if language not in found:
+                    found.append(language)
+    return tuple(found)
 
 
 # --- scoring ---------------------------------------------------------------

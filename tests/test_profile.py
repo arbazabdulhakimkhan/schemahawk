@@ -262,7 +262,12 @@ preferred_rate:
     summary = profile.summary()
     assert summary["years experience"] == "8"
     assert summary["rate"] == "set"
-    assert "80" not in " ".join(summary.values())
+    # Assert against profile *content* values only. The `path` key is
+    # documented filesystem metadata (not profile data) and can contain
+    # digits from pytest's numbered tmp dirs (e.g. "pytest-80"), which
+    # used to make this assertion fail intermittently.
+    content = " ".join(v for k, v in summary.items() if k != "path")
+    assert "80" not in content
 
 
 def test_summary_marks_unspecified_values(tmp_path):
