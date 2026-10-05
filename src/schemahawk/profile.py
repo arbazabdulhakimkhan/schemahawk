@@ -30,6 +30,20 @@ log = logging.getLogger(__name__)
 PROFILE_VERSION = 1
 DEFAULT_PROFILE_PATH = Path("config/profile.yaml")
 
+# The seniority bands the matching layer knows how to compare. A profile may
+# declare one of these or none; anything else is rejected rather than silently
+# degrading to UNKNOWN at scoring time.
+SENIORITY_BANDS: tuple[str, ...] = (
+    "junior",
+    "mid",
+    "senior",
+    "staff",
+    "lead",
+    "principal",
+)
+
+# Provenance of a loaded profile. Lets the CLI say *which* profile is in use
+# without disclosing its contents.
 # Provenance of a loaded profile. Lets the CLI say *which* profile is in use
 # without disclosing its contents.
 SOURCE_FILE = "file"
@@ -145,6 +159,30 @@ class CandidateProfile:
 
 
 # --- coercion helpers -------------------------------------------------------
+
+def _seniority_band(value: Any, key: str = "seniority") -> str | None:
+    """Validate a declared candidate seniority against the known bands.
+
+    An unrecognised value used to flow straight into matching, where
+    ``_SENIORITY_RANK.get(...)`` silently returned ``None`` and the whole
+    seniority comparison became ``UNKNOWN``. That is the worst possible
+    failure mode: a typo in the profile looked like the operator declined to
+    state a seniority, which reads identically to "no preference" and quietly
+    changed match scores. Failing loudly is the honest outcome.
+
+    Deliberately no alias mapping: inventing ``expert -> staff`` or normalising
+    ``Sr. -> senior`` would manufacture a candidate fact that was never stated.
+    """
+    text = _opt_str(value, key)
+    if text is None:
+        return None
+    lowered = text.lower()
+    if lowered not in SENIORITY_BANDS:
+        raise ProfileError(
+            f"'{key}' must be one of {', '.join(SENIORITY_BANDS)}; got {text!r}"
+        )
+    return lowered
+
 
 def _opt_str(value: Any, key: str) -> str | None:
     if value is None:
@@ -286,7 +324,7 @@ def parse_profile(data: Any, *, source: str = SOURCE_FILE,
         headline=_opt_str(candidate.get("headline"), "candidate.headline"),
         total_years_experience=_opt_float(
             data.get("total_years_experience"), "total_years_experience"),
-        seniority=_opt_str(data.get("seniority"), "seniority"),
+        seniority=_seniority_band(data.get("seniority"), "seniority"),
         availability=_opt_str(data.get("availability"), "availability"),
         timezone=_opt_str(data.get("timezone"), "timezone"),
         work_authorization=_opt_str(data.get("work_authorization"),

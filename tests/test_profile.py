@@ -14,6 +14,7 @@ import pytest
 from schemahawk.config import Settings
 from schemahawk.profile import (
     PROFILE_VERSION,
+    SENIORITY_BANDS,
     SOURCE_DEFAULT,
     SOURCE_EXAMPLE,
     SOURCE_FILE,
@@ -388,3 +389,59 @@ def test_profile_api_surface_exports_all_three_concepts():
     assert "load_profile" in exported
     assert "load_private_profile" in exported
     assert "default_profile" in exported
+# --- seniority validation (Phase 2C hardening) --------------------------
+# An unrecognised band used to flow straight into matching, where
+# _SENIORITY_RANK.get() returned None and the comparison became UNKNOWN - a typo
+# was indistinguishable from "the operator declined to state a seniority", and
+# it silently moved match scores.
+
+
+@pytest.mark.parametrize("band", SENIORITY_BANDS)
+def test_valid_seniority_bands_are_accepted(band):
+    assert parse_profile({"version": 1, "seniority": band}).seniority == band
+
+
+@pytest.mark.parametrize("value", ["Senior", "PRINCIPAL", "  senior  "])
+def test_seniority_is_case_and_whitespace_normalised(value):
+    assert parse_profile({"version": 1, "seniority": value}).seniority == value.strip().lower()
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_absent_seniority_stays_unknown(value):
+    assert parse_profile({"version": 1, "seniority": value}).seniority is None
+
+
+def test_seniority_absent_entirely_is_allowed():
+    assert parse_profile({"version": 1}).seniority is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["expert", "Sr.", "senior/lead", "expert-level", "mid level", "director", "8"],
+)
+def test_invalid_seniority_fails_loudly(value):
+    """Failing loudly beats a silent UNKNOWN, which reads as 'not stated'."""
+    with pytest.raises(ProfileError) as excinfo:
+        parse_profile({"version": 1, "seniority": value})
+    message = str(excinfo.value)
+    assert "seniority" in message
+    # the message must tell the operator what is acceptable
+    for band in SENIORITY_BANDS:
+        assert band in message
+
+
+def test_invalid_seniority_error_never_echoes_other_profile_fields():
+    """The error names the bad value only, never the rest of the profile."""
+    with pytest.raises(ProfileError) as excinfo:
+        parse_profile({
+            "version": 1,
+            "seniority": "expert",
+            "contact_email": "someone@example.com",
+            "preferred_rate": "900/day",
+        })
+    assert "someone@example.com" not in str(excinfo.value)
+    assert "900/day" not in str(excinfo.value)
+
+
+def test_seniority_bands_are_the_documented_set():
+    assert SENIORITY_BANDS == ("junior", "mid", "senior", "staff", "lead", "principal")

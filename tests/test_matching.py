@@ -12,10 +12,15 @@ from __future__ import annotations
 import pytest
 
 from schemahawk.matching import (
+    ADJACENT,
+    ALIGNED,
+    BELOW,
+    OVER_QUALIFIED,
     UNKNOWN,
     MatchResult,
     extract_requirements,
     extract_seniority,
+    extract_seniority_from_description,
     match_job,
 )
 from schemahawk.models import Job
@@ -169,10 +174,17 @@ def test_seniority_alignment_when_equal():
     assert result.seniority_alignment == "ALIGNED"
 
 
-def test_candidate_more_senior_than_role_is_aligned():
+def test_candidate_more_senior_than_role_is_reported_over_qualified():
+    """Over-level is distinguishable from an exact fit.
+
+    Previously this returned ALIGNED, so "Junior Payroll Assistant" and
+    "Senior Data Engineer" were indistinguishable for a staff-level candidate.
+    The verdict is informational; the score is unchanged (see the scoring
+    tests below).
+    """
     result = match_job(job(title="Junior Data Engineer"),
                        profile(skills=["Python"], seniority="staff"))
-    assert result.seniority_alignment == "ALIGNED"
+    assert result.seniority_alignment == OVER_QUALIFIED
 
 
 def test_candidate_below_seniority_is_flagged():
@@ -638,3 +650,208 @@ def test_absurd_year_count_is_never_fabricated_into_a_requirement():
         job(description="We need 100 years of experience."),
         profile(),
     ).min_years_experience is None
+# --- seniority verdicts (OVER_QUALIFIED) ---------------------------------
+# Over-level used to collapse into ALIGNED. It is now its own verdict, but it
+# is *informational only*: the score must be identical to an exact fit, because
+# postings state a minimum competence bar and not a ceiling.
+
+_BANDS = ("principal", "staff", "lead", "senior", "mid", "junior")
+
+
+@pytest.mark.parametrize(
+    ("candidate", "job", "expected"),
+    [
+        # exact fits stay ALIGNED
+        ("senior", "senior", ALIGNED),
+        ("junior", "junior", ALIGNED),
+        ("principal", "principal", ALIGNED),
+        # any band above the role is OVER_QUALIFIED
+        ("senior", "junior", OVER_QUALIFIED),
+        ("senior", "mid", OVER_QUALIFIED),
+        ("staff", "senior", OVER_QUALIFIED),
+        ("principal", "senior", OVER_QUALIFIED),
+        ("principal", "junior", OVER_QUALIFIED),
+        # one band under the role is ADJACENT
+        ("mid", "senior", ADJACENT),
+        ("junior", "mid", ADJACENT),
+        # two or more bands under is BELOW
+        ("junior", "senior", BELOW),
+        ("junior", "principal", BELOW),
+        ("mid", "staff", BELOW),
+        # either side unstated is UNKNOWN
+        ("senior", None, UNKNOWN),
+        (None, "senior", UNKNOWN),
+        ("senior", "expert", UNKNOWN),
+    ],
+)
+def test_seniority_verdict_matrix(candidate, job, expected):
+    from schemahawk.matching import _score_seniority
+
+    assert _score_seniority(job, candidate) == expected
+
+
+def test_over_qualified_scores_identically_to_aligned():
+    """The informational verdict must not move the number.
+
+    If being above the band lowered the score, a junior title would rank
+    *worse* for a senior candidate than for a junior one.
+    """
+    common = dict(skills=["Python"], total_years_experience=7)
+    exact = match_job(job(title="Senior Data Engineer", description="Use Python."),
+                      profile(seniority="senior", **common))
+    over = match_job(job(title="Junior Data Engineer", description="Use Python."),
+                     profile(seniority="senior", **common))
+
+    assert exact.seniority_alignment == ALIGNED
+    assert over.seniority_alignment == OVER_QUALIFIED
+    assert exact.experience_score == over.experience_score == 100
+    assert exact.overall_score == over.overall_score
+
+
+def test_over_qualified_is_never_a_rejection():
+    result = match_job(job(title="Junior Payroll Assistant"),
+                       profile(skills=["Python"], seniority="staff"))
+    assert result.eligibility_conflict is None
+    assert result.seniority_alignment == OVER_QUALIFIED
+
+
+def test_over_qualified_explanation_reads_as_a_word_not_a_constant():
+    result = match_job(job(title="Junior Data Engineer"),
+                       profile(skills=["Python"], seniority="staff"))
+    line = [l for l in result.explanation if l.startswith("Seniority:")][0]
+    assert "over-qualified" in line
+    assert "OVER_QUALIFIED" not in line
+    assert "_" not in line.split("(")[0]
+
+
+def test_seniority_score_is_monotonic_in_candidate_level():
+    """A more senior candidate never scores worse for the same posting."""
+    scores = []
+    for level in _BANDS:
+        result = match_job(job(title="Senior Data Engineer", description="Use Python."),
+                           profile(skills=["Python"], seniority=level))
+        scores.append((level, result.experience_score))
+    assert scores[0][1] >= scores[1][1] >= scores[2][1] >= scores[3][1] \
+        >= scores[4][1] >= scores[5][1]
+
+
+def test_seniority_verdict_constants_are_exported():
+    from schemahawk import matching
+
+    for name in ("ALIGNED", "OVER_QUALIFIED", "ADJACENT", "BELOW", "UNKNOWN"):
+        assert name in matching.__all__
+        assert getattr(matching, name) == name
+# --- evidence-gated seniority extraction ---------------------------------
+# Body copy mentions "lead", "staff", "senior" and "principal" constantly
+# without describing the role's level. An ungated scan fired on 42 of 171 live
+# postings and not one of them described the role.
+
+_ALL_BANDS = ("junior", "mid", "senior", "staff", "lead", "principal")
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Junior Data Engineer", "junior"),
+        ("Mid-level Data Engineer", "mid"),
+        ("Senior Data Engineer", "senior"),
+        ("Staff Data Engineer", "staff"),
+        ("Lead Data Engineer", "lead"),
+        ("Principal Data Engineer", "principal"),
+        ("Sr. Analyst", "senior"),
+        ("Data Engineer", None),
+    ],
+)
+def test_seniority_is_extracted_from_the_title(title, expected):
+    assert extract_seniority(title) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # hiring cue
+        ("We are looking for a senior data engineer.", "senior"),
+        ("Seeking staff engineers for our team.", "staff"),
+        ("We need junior developers.", "junior"),
+        ("Seeking a lead for our platform team.", "lead"),
+        # years-of-experience phrase
+        ("5+ years in a senior engineering role.", "senior"),
+        ("Requires 3+ years of experience as a principal engineer.", "principal"),
+        ("5+ years in a mid-level role.", "mid"),
+        # hyphenated level
+        ("This is a senior-level position.", "senior"),
+        ("Entry-level role available.", "junior"),
+        ("Mid-level Data Analyst wanted.", "mid"),
+    ],
+)
+def test_explicit_description_evidence_sets_seniority(text, expected):
+    assert extract_seniority_from_description(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "You will lead a team of analysts.",
+        "We have senior leadership.",
+        "Work with staff members daily.",
+        "Located near principal office.",
+        "Engage senior stakeholders.",
+        "Work with senior engineers.",
+        "Our staff is global.",
+        "The principal reason is cost.",
+        "You will be leading the roadmap.",
+        "Lead client conversations daily.",
+        "Interact with all levels of staff.",
+    ],
+)
+def test_ambiguous_description_mentions_do_not_set_seniority(text):
+    """Every one of these produced a wrong band before the evidence gate."""
+    assert extract_seniority_from_description(text) is None
+
+
+@pytest.mark.parametrize("band", _ALL_BANDS)
+def test_every_band_is_reachable_from_both_tiers(band):
+    """Each band must be detectable from a title and from explicit evidence."""
+    from schemahawk.matching import _SENIORITY_RANK
+
+    title_map = {
+        "junior": "Junior Data Engineer",
+        "mid": "Mid-level Data Engineer",
+        "senior": "Senior Data Engineer",
+        "staff": "Staff Data Engineer",
+        "lead": "Lead Data Engineer",
+        "principal": "Principal Data Engineer",
+    }
+    assert band in _SENIORITY_RANK
+    assert extract_seniority(title_map[band]) == band
+
+
+def test_description_is_consulted_only_when_the_title_is_silent():
+    """A title band always wins; body copy cannot override it."""
+    titled = extract_requirements(
+        job(title="Junior Data Engineer", description="We are looking for a senior engineer."),
+        profile(),
+    )
+    assert titled.seniority == "junior"
+
+    untitled = extract_requirements(
+        job(title="Data Engineer", description="We are looking for a senior engineer."),
+        profile(),
+    )
+    assert untitled.seniority == "senior"
+
+
+def test_body_copy_never_overrides_a_silent_title():
+    ambiguous = extract_requirements(
+        job(title="Data Engineer", description="You will lead a team of analysts."),
+        profile(),
+    )
+    assert ambiguous.seniority is None
+
+
+def test_over_qualified_band_survives_the_gated_extraction():
+    """A junior title stays detected, so over-qualification is still reported."""
+    result = match_job(job(title="Junior Data Engineer"),
+                       profile(skills=["Python"], seniority="staff"))
+    assert result.seniority_alignment == OVER_QUALIFIED
+    assert result.experience_score == 100

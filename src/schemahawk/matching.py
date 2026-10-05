@@ -44,8 +44,14 @@ W_ELIGIBILITY = 0.10
 
 # Verdicts
 UNKNOWN = "UNKNOWN"
-ALIGNED = "ALIGNED"
 BELOW = "BELOW"
+ADJACENT = "ADJACENT"
+ALIGNED = "ALIGNED"
+# Purely informational: a candidate above the role's band is not a weaker match
+# than an exact fit, so it scores identically to ALIGNED. Postings state a
+# minimum competence bar, not a ceiling; penalising above it would make a
+# junior title score *worse* for a senior candidate than for a junior one.
+OVER_QUALIFIED = "OVER_QUALIFIED"
 NO_GAP = "NO_GAP"
 FIT = "FIT"
 MISMATCH = "MISMATCH"
@@ -193,11 +199,76 @@ def _searchable(job: Job) -> str:
 
 
 def extract_seniority(text: str) -> str | None:
-    """Seniority implied by the wording, or ``None`` when absent."""
+    """Seniority band named by the **title**, or ``None`` when absent.
+
+    Deliberately a blind word scan, which is only safe on a job title where
+    "Senior", "Lead" or "Principal" are part of the role name. Never call this
+    on body copy - use :func:`extract_seniority_from_description`.
+    """
     for name, terms in _SENIORITY_TERMS:
         for term in terms:
             if re.search(rf"(?<!\w)(?:{term})(?!\w)", text, re.I):
                 return name
+    return None
+
+
+# Body copy mentions these words constantly without describing the role's level:
+# "lead a team", "our staff", "senior stakeholders", "principal reason".
+_SENIORITY_BAND_WORDS = r"senior|staff|principal|lead|junior|mid[- ]level"
+_SENIORITY_BAND_FROM_WORD = {
+    "senior": "senior",
+    "staff": "staff",
+    "principal": "principal",
+    "lead": "lead",
+    "junior": "junior",
+    "mid-level": "mid",
+    "mid level": "mid",
+    # The hyphenated pattern captures only the prefix ("entry" from
+    # "entry-level"), so the bare forms need their own entries.
+    "mid": "mid",
+    "entry": "junior",
+    "entry-level": "junior",
+}
+
+_EXPLICIT_SENIORITY = (
+    # "we are looking for a senior data engineer", "seeking staff engineers"
+    re.compile(
+        r"\b(?:looking\s+for|seeking|searching\s+for|we\s+need|"
+        r"we\s+are\s+(?:looking\s+for|seeking|hiring)|hiring|"
+        r"require[sd]?|candidates?\s+must\s+be)\s+"
+        r"(?:an?\s+|the\s+)?(?P<band>" + _SENIORITY_BAND_WORDS + r")\b",
+        re.I,
+    ),
+    # "5+ years in a senior engineering role"
+    re.compile(
+        r"\b\d+\+?\s*years?\b[^.]{0,40}?\b(?:in|as|of)\s+(?:an?\s+)?"
+        r"(?P<band>" + _SENIORITY_BAND_WORDS + r")\b",
+        re.I,
+    ),
+    # "senior-level position", "entry-level role"
+    re.compile(
+        r"\b(?P<band>senior|staff|principal|junior|mid|entry)[- ]level\b",
+        re.I,
+    ),
+)
+
+
+def extract_seniority_from_description(text: str) -> str | None:
+    """Seniority band stated as an explicit requirement in body copy, or ``None``.
+
+    Three gated shapes only: a hiring cue, a years-of-experience phrase, or a
+    hyphenated level. Verbs, collective nouns and bare adjectives are treated as
+    absent. Measured over 171 postings the ungated description scan fired on 42
+    jobs and every hit was noise - "I lead People Operations", "interact with all
+    levels of staff", "our staff of more than", "Lead client conversations".
+    """
+    if not text:
+        return None
+    for pattern in _EXPLICIT_SENIORITY:
+        found = pattern.search(text)
+        if found:
+            word = re.sub(r"\s+", "-", found.group("band").strip().lower())
+            return _SENIORITY_BAND_FROM_WORD.get(word)
     return None
 
 
@@ -217,7 +288,13 @@ def extract_requirements(job: Job, profile: CandidateProfile) -> JobRequirements
     text = _searchable(job)
 
     min_years = _extract_years(text)
-    seniority = extract_seniority(job.title or "") or extract_seniority(text)
+    # Title is the authoritative source. Body copy is only consulted through
+    # the evidence-gated extractor - a plain word scan there matched "lead a
+    # team", "our staff" and "principal reason" on real postings.
+    seniority = (
+        extract_seniority(job.title or "")
+        or extract_seniority_from_description(job.description)
+    )
 
     contract_types = tuple(
         term for term in _CONTRACT_TERMS
@@ -509,7 +586,14 @@ def _score_experience(req: JobRequirements, profile: CandidateProfile) -> tuple[
     # --- seniority ---
     seniority_alignment = _score_seniority(req.seniority, profile.seniority)
     if seniority_alignment != UNKNOWN:
-        seniority_score = {ALIGNED: 100.0, "ADJACENT": 70.0, BELOW: 40.0}[seniority_alignment]
+        seniority_score = {
+        ALIGNED: 100.0,
+        # Informational only: identical score to ALIGNED. Being above the band
+        # is a retention/compensation consideration, not a capability gap.
+        OVER_QUALIFIED: 100.0,
+        ADJACENT: 70.0,
+        BELOW: 40.0,
+    }[seniority_alignment]
         parts.append((0.5, seniority_score))
 
     score = None
@@ -520,21 +604,30 @@ def _score_experience(req: JobRequirements, profile: CandidateProfile) -> tuple[
 
 
 def _score_seniority(job_seniority: str | None, profile_seniority: str | None) -> str:
-    """ALIGNED / ADJACENT / BELOW / UNKNOWN.
+    """ALIGNED / OVER_QUALIFIED / ADJACENT / BELOW / UNKNOWN.
 
     The term table is ordered most senior first, so a *smaller* rank is more
-    senior. A candidate at or above the role's level is ALIGNED (they can
-    cover it) rather than penalised; being one band under is ADJACENT, and two
-    or more bands under is BELOW.
+    senior.
+
+    - at or above the role's level the candidate can cover it: an exact band is
+      ALIGNED and anything above it is OVER_QUALIFIED;
+    - one band under is ADJACENT, two or more is BELOW;
+    - either side unstated is UNKNOWN.
+
+    OVER_QUALIFIED is reported for information only and carries the same score
+    as ALIGNED. It is deliberately *not* a rejection and not a penalty: it
+    signals retention, compensation and culture risk, not capability.
     """
     job_rank = _SENIORITY_RANK.get((job_seniority or "").lower())
     profile_rank = _SENIORITY_RANK.get((profile_seniority or "").lower())
     if job_rank is None or profile_rank is None:
         return UNKNOWN
-    if profile_rank <= job_rank:          # at or above the required level
+    if profile_rank < job_rank:              # strictly above the role's band
+        return OVER_QUALIFIED
+    if profile_rank == job_rank:
         return ALIGNED
-    if profile_rank == job_rank + 1:      # one band below
-        return "ADJACENT"
+    if profile_rank == job_rank + 1:        # one band below
+        return ADJACENT
     return BELOW
 
 
@@ -714,7 +807,9 @@ def build_explanation(
                 if not profile.seniority else "job states no seniority")
         lines.append(f"Seniority: UNKNOWN ({side})")
     else:
-        lines.append(f"Seniority: {alignment.lower()} "
+        # OVER_QUALIFIED would otherwise read "over_qualified".
+        label = alignment.lower().replace("_", "-")
+        lines.append(f"Seniority: {label} "
                      f"(profile: {profile.seniority or 'unset'} | job: {req.seniority})")
 
     if contract is None:
@@ -732,13 +827,17 @@ def build_explanation(
 
 
 __all__ = [
+    "ADJACENT",
+    "ALIGNED",
+    "BELOW",
+    "OVER_QUALIFIED",
+    "UNKNOWN",
     "JobRequirements",
     "MatchResult",
     "extract_requirements",
     "extract_seniority",
     "match_job",
     "build_explanation",
-    "UNKNOWN",
 ]
 
 
