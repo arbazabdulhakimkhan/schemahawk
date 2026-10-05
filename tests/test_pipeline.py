@@ -266,7 +266,11 @@ def test_report_prints_unknown_for_unspecified_profile(settings):
                      description=MATCH_JD)]
     report, _ = _run(replace(settings, db_path=None), jobs,
                      profile=default_profile())
-    block = "\n".join(report.render().splitlines()[-8:])
+    # Section-scoped, not "last N lines": Phase 3A appends an application-route
+    # section after the match block, so trailing-line slicing is no longer a
+    # reliable way to reach it.
+    text = report.render()
+    block = text.split("Overall candidate match:")[1].split("Application routes:")[0]
     assert "Candidate Match Score: UNKNOWN" in block
     assert "Technical: UNKNOWN" in block
 
@@ -291,3 +295,50 @@ def test_matching_never_marks_a_job_strong_by_itself(settings):
                      profile=parse_profile({"skills": ["Photoshop"]}))
     assert report.strong_candidates == 0
     assert report.matches == []
+
+# --- Phase 3A: application routes ----------------------------------------
+
+
+def test_pipeline_classifies_a_route_for_every_match(settings):
+    jobs = [make_job(url="https://e.com/m7", source_job_id="m7",
+                     minutes_old=5, description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None), jobs, profile=default_profile())
+    assert len(report.routes) == len(report.matches)
+    text = report.render()
+    assert "Application routes:" in text
+
+
+def test_report_names_the_route_type_and_evidence(settings):
+    jobs = [make_job(url="https://e.com/m8", source_job_id="m8",
+                     minutes_old=5, description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None), jobs, profile=default_profile())
+    text = report.render()
+    assert "Route:" in text
+    assert "Evidence:" in text
+    assert "https://e.com/m8" in text
+
+
+def test_route_classification_is_deterministic(settings):
+    jobs = [make_job(url="https://e.com/m9", source_job_id="m9",
+                     minutes_old=5, description=MATCH_JD)]
+    first, _ = _run(replace(settings, db_path=None), jobs, profile=default_profile())
+    second, _ = _run(replace(settings, db_path=None), jobs, profile=default_profile())
+    assert ([r.route_type for _, r in first.routes]
+            == [r.route_type for _, r in second.routes])
+
+
+def test_route_stage_does_not_mutate_the_v1_relevance_score(settings):
+    jobs = [make_job(url="https://e.com/m10", source_job_id="m10",
+                     minutes_old=5, description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None), jobs, profile=default_profile())
+    for job, _route in report.routes:
+        assert job.relevance_score is not None
+        assert job.application_url is None or job.application_url
+
+
+def test_route_stage_never_invents_a_contact(settings):
+    jobs = [make_job(url="https://e.com/m11", source_job_id="m11",
+                     minutes_old=5, description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None), jobs, profile=default_profile())
+    for _job, route in report.routes:
+        assert "@" not in (route.url or "")

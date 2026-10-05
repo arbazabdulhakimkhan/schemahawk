@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .models import FreshnessStatus, Job
+from .routes import ApplicationRouteInfo
 from .matching import UNKNOWN, MatchResult
 
 _STAMP = "%Y-%m-%d %H:%M UTC"
@@ -46,6 +47,24 @@ def _render_match(job: Job, match: MatchResult) -> list[str]:
     lines += [f"    {line}" for line in match.explanation]
     return lines
 
+
+def _render_route(job: Job, route: ApplicationRouteInfo) -> list[str]:
+    """One application-route block.
+
+    Classification only - nothing here contacts anyone. The route URL is
+    printed so an operator can open it themselves; the system never does.
+    """
+    lines = [
+        f"- {job.title or '(untitled)'} @ {job.company or 'unknown company'}",
+        f"    Route: {route.route_type.name} "
+        f"(confidence {route.confidence.name}, "
+        f"official={'yes' if route.is_official else 'no'}, "
+        f"actionable={'yes' if route.directly_actionable else 'no'})",
+        f"    Evidence: {route.evidence}",
+    ]
+    if route.url:
+        lines.append(f"    {route.url}")
+    return lines
 
 def _fmt(moment: datetime | None) -> str:
     if moment is None:
@@ -81,6 +100,9 @@ class RunReport:
     strong_candidates: int = 0
     strong: list[Job] = field(default_factory=list)
     matches: list[tuple[Job, MatchResult]] = field(default_factory=list)
+    #: Parallel to ``matches`` - the classified application route per job.
+    #: Report-only in Phase 3A: no column, because the taxonomy may still change.
+    routes: list[tuple[Job, ApplicationRouteInfo]] = field(default_factory=list)
 
     stored_inserted: int = 0
     stored_updated: int = 0
@@ -163,6 +185,11 @@ class RunReport:
             lines += ["", "Overall candidate match:"]
             for job, match in self.matches:
                 lines += _render_match(job, match)
+
+        if self.routes:
+            lines += ["", "Application routes:"]
+            for job, route in self.routes:
+                lines += _render_route(job, route)
 
         return "\n".join(lines) + "\n"
 

@@ -30,6 +30,7 @@ from .models import (
     QualityStatus,
 )
 from .matching import match_job
+from .routes import ApplicationRoute, classify_route
 from .normalize import attach_keys, clean_text
 from .profile import CandidateProfile, profile_from_settings
 from .quality import classify
@@ -170,6 +171,11 @@ def _discover(settings, report, store, *, now, only_source, force, since_minutes
         (job, match_job(job, profile, min_relevance=threshold))
         for job in strong
     ]
+
+    # Application-route classification (Phase 3A). Pure classification: the
+    # pipeline ends at MATCHED -> route found / NO_ROUTE. Nothing here fetches
+    # a URL, sends mail, or submits anything.
+    report.routes = [(job, classify_route(job)) for job, _ in report.matches]
 
     report.stored_inserted, report.stored_updated = store.upsert_jobs(unique)
     report.completed_at = datetime.now(timezone.utc)
