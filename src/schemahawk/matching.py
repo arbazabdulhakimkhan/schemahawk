@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 from .models import Job
 from .profile import CandidateProfile
-from .eligibility import LocationScope
+from .eligibility import LocationScope, hard_ineligibility_reason
 from .skills import DEFAULT_VOCABULARY, alias_map, canonical_names, vocabulary_for
 from .textmatch import matched_phrases, matcher_for_phrase
 
@@ -172,8 +172,13 @@ class MatchResult:
     @property
     def is_fully_unknown(self) -> bool:
         return self.overall_score is None
-    r"|\bUS\b.{0,12}\bcitizens?(?:hip)?\b.{0,20}\b(?:only|required|must)\b"
-    r"|\bcitizenship\s+(?:is\s+)?required\b"
+
+    #: Set only when the posting and the candidate *both* state a side that
+    #: provably conflicts. ``None`` means "no conflict found", which includes
+    #: the case where the candidate's authorization or location is unknown.
+    eligibility_conflict: str | None = None
+
+
 # --- extraction -------------------------------------------------------------
 
 def _searchable(job: Job) -> str:
@@ -478,11 +483,14 @@ def _score_experience(req: JobRequirements, profile: CandidateProfile) -> tuple[
         year_score = 100 if gap == 0 else max(0, 100 - 20 * gap)
         parts.append((0.5, year_score))
         verdict = NO_GAP if gap == 0 else BELOW
+    elif profile.total_years_experience is None:
+        # The candidate has not declared years: unknown, never assumed.
+        verdict = UNKNOWN
     else:
-        if profile.total_years_experience is None:
-            verdict = UNKNOWN   # never assumed
-        elif req.min_years_experience is None:
-            verdict = NO_GAP     # candidate has years, job asks for none
+        # The candidate declared years but the posting states no requirement.
+        # There is nothing to meet, so this is NOT evidence of a match: an
+        # absent requirement is unknown, exactly like an absent fact.
+        verdict = UNKNOWN
 
     # --- seniority ---
     seniority_alignment = _score_seniority(req.seniority, profile.seniority)
@@ -596,12 +604,19 @@ def match_job(job: Job, profile: CandidateProfile) -> MatchResult:
         (W_ELIGIBILITY, eligibility),
     ))
 
+    conflict = hard_ineligibility_reason(
+        job,
+        candidate_authorization=profile.work_authorization,
+        candidate_locations=profile.preferred_locations,
+    )
+
     return MatchResult(
         technical_score=technical,
         experience_score=experience,
         contract_score=contract,
         eligibility_score=eligibility,
         overall_score=overall,
+        eligibility_conflict=conflict,
         seniority_alignment=_score_seniority(req.seniority, profile.seniority),
         experience_match=experience_verdict,
         contract_fit=contract_verdict,
@@ -723,10 +738,23 @@ def _score_eligibility(job: Job) -> tuple[int | None, str]:
     return None, UNKNOWN
 
 
+#: A confident overall score needs at least this many knowable components.
+#: With only one, the result is that single component's score wearing a
+#: 0-100 label, which reads as a verdict when it is really an anecdote: a
+#: posting that states nothing at all made every component UNKNOWN except
+#: one, and renormalizing over it returned a perfect 100. Confidence must
+#: come from agreement between components, never from a lone measurement.
+MIN_KNOWABLE_COMPONENTS = 2
+
+
 def _weighted_overall(components: tuple[tuple[float, int | None], ...]) -> int | None:
-    """Weighted mean over the knowable components only."""
+    """Weighted mean over the knowable components only.
+
+    Returns ``None`` unless at least ``MIN_KNOWABLE_COMPONENTS`` components are
+    knowable. The weights are unchanged; only the confidence rule is added.
+    """
     known = [(weight, value) for weight, value in components if value is not None]
-    if not known:
+    if len(known) < MIN_KNOWABLE_COMPONENTS:
         return None
     total = sum(weight for weight, _ in known)
     return round(sum(weight * value for weight, value in known) / total)

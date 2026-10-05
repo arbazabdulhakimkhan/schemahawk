@@ -13,6 +13,7 @@ from schemahawk.eligibility import (
     LocationScope,
     WorkAuthorization,
     assess,
+    hard_ineligibility_reason,
     timezone_constraint,
 )
 from schemahawk.models import (
@@ -30,6 +31,13 @@ from schemahawk.models import (
     normalize_contract_type,
 )
 from schemahawk.quality import classify
+from schemahawk.matching import match_job
+from schemahawk.profile import parse_profile
+
+
+def profile(**kwargs):
+    """A minimal profile; ``work_authorization``/locations drive the P1 checks."""
+    return parse_profile({"version": 1, **kwargs})
 
 from conftest import make_job
 
@@ -363,3 +371,101 @@ def test_compound_labels_survive_the_jobicy_adapter(label, settings):
     assert job.contract_type is not None
     assert job.contract_type in CONTRACT_TYPES
 
+# --- P1: hard eligibility conflicts (Phase 2C) --------------------------
+# A conflict needs BOTH sides stated. An unknown candidate fact is never a
+# failure, and "remote" is never a geographic claim.
+
+
+def test_explicit_citizenship_conflict_is_a_hard_reject():
+    reason = hard_ineligibility_reason(
+        make_job(description="US citizens only."),
+        candidate_authorization="Germany citizen",
+    )
+    assert reason is not None
+    assert "US" in reason
+
+
+def test_explicit_authorization_conflict_is_a_hard_reject():
+    reason = hard_ineligibility_reason(
+        make_job(description="Must be authorized to work in the US."),
+        candidate_authorization="Germany citizen",
+    )
+    assert reason is not None
+    assert "US" in reason
+
+
+def test_explicit_country_conflict_is_a_hard_reject():
+    reason = hard_ineligibility_reason(
+        make_job(location="US only"),
+        candidate_locations=("Germany",),
+    )
+    assert reason is not None
+    assert "US" in reason
+
+
+def test_country_conflict_compares_spellings_not_codes():
+    """Regression: the posting resolves to code DE, the candidate writes Germany.
+
+    Comparing the code against the word made every genuine match look like a
+    conflict, which would reject correct candidates.
+    """
+    assert hard_ineligibility_reason(
+        make_job(location="Germany only"), candidate_locations=("Germany",)
+    ) is None
+    assert hard_ineligibility_reason(
+        make_job(location="DE only"), candidate_locations=("Germany",)
+    ) is None
+
+
+def test_matching_candidate_location_still_matches():
+    assert hard_ineligibility_reason(
+        make_job(location="US only"), candidate_locations=("Germany", "United States")
+    ) is None
+
+
+def test_unknown_candidate_authorization_never_hard_rejects():
+    for text in ("US citizens only.", "Must be authorized to work in the US."):
+        assert hard_ineligibility_reason(
+            make_job(description=text), candidate_authorization=None
+        ) is None
+
+
+def test_unknown_candidate_location_never_hard_rejects():
+    assert hard_ineligibility_reason(
+        make_job(location="US only"), candidate_locations=()
+    ) is None
+
+
+def test_remote_without_geographic_evidence_never_hard_rejects():
+    assert hard_ineligibility_reason(
+        make_job(remote=True), candidate_locations=("Germany",)
+    ) is None
+
+
+def test_worldwide_posting_never_conflicts_geographically():
+    assert hard_ineligibility_reason(
+        make_job(description="This role is worldwide."),
+        candidate_locations=("Germany",),
+        candidate_authorization="Germany citizen",
+    ) is None
+
+
+def test_posting_with_no_restriction_never_conflicts():
+    assert hard_ineligibility_reason(
+        make_job(description="We build data pipelines."),
+        candidate_locations=("Germany",),
+        candidate_authorization="Germany citizen",
+    ) is None
+
+
+def test_matching_surfaces_the_conflict_on_the_match_result():
+    result = match_job(
+        make_job(description="US citizens only."),
+        profile(work_authorization="Germany citizen"),
+    )
+    assert result.eligibility_conflict is not None
+
+
+def test_match_result_has_no_conflict_when_candidate_is_unknown():
+    result = match_job(make_job(description="US citizens only."), profile())
+    assert result.eligibility_conflict is None

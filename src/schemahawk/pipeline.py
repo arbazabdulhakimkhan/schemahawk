@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from .config import Settings
 from .dedupe import dedupe
+from .eligibility import hard_ineligibility_reason
 from .freshness import evaluate_freshness
 from .models import (
     EligibilityStatus,
@@ -135,6 +136,26 @@ def _discover(settings, report, store, *, now, only_source, force, since_minutes
         if job.status == PipelineStatus.MATCHED:
             strong.append(job)
 
+    # Hard eligibility rejection (Phase 2C, P1). Runs after relevance and
+    # freshness so it can never invent a rejection out of missing data: the
+    # posting must state a restriction *and* the profile must state the
+    # conflicting side. Otherwise `hard_ineligibility_reason` returns None and
+    # the job is untouched - unknown candidate facts never reject.
+    if settings.hard_reject_ineligible:
+        for job in list(strong):
+            conflict = hard_ineligibility_reason(
+                job,
+                candidate_authorization=profile.work_authorization,
+                candidate_locations=profile.preferred_locations,
+            )
+            if conflict is None:
+                continue
+            job.status = PipelineStatus.REJECTED
+            job.eligibility_status = EligibilityStatus.RESTRICTED
+            job.work_authorization = conflict
+            job.rejection_reason = f"eligibility: {conflict}"
+            strong.remove(job)
+            _count_rejection(report, job)
     strong.sort(key=_strong_sort_key)
     report.strong = strong[:MAX_STRONG_IN_REPORT]
     report.strong_candidates = len(strong)

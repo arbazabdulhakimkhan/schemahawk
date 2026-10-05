@@ -81,6 +81,15 @@ _REGIONS: dict[str, str] = {
 }
 
 _COUNTRY_ALT = "|".join(sorted((re.escape(k) for k in _COUNTRIES), key=len, reverse=True))
+# Reverse lookup: ISO code -> the spellings that normalize to it. Needed because
+# a posting's country is stored as a code ("DE") while a candidate's stated
+# location is free text ("germany"); comparing a code against a word would make
+# every genuine match look like a conflict.
+_NAMES_BY_CODE: dict[str, tuple[str, ...]] = {}
+for _alias, _code in _COUNTRIES.items():
+    _NAMES_BY_CODE.setdefault(_code, ())
+    if _alias not in _NAMES_BY_CODE[_code]:
+        _NAMES_BY_CODE[_code] += (_alias,)
 _REGION_ALT = "|".join(sorted((re.escape(k) for k in _REGIONS), key=len, reverse=True))
 _PLACE_ALT = rf"(?:{_COUNTRY_ALT}|{_REGION_ALT})"
 
@@ -369,10 +378,82 @@ def timezone_constraint(text: str) -> str | None:
     return "overlapping hours"
 
 
+def hard_ineligibility_reason(
+    job: Job,
+    *,
+    candidate_authorization: str | None = None,
+    candidate_locations: tuple[str, ...] = (),
+) -> str | None:
+    """An explicit, provable eligibility conflict - or ``None``.
+
+    This is deliberately much stricter than :func:`assess`, which describes what
+    a posting says. A *conflict* additionally needs the candidate's own side of
+    the comparison to be stated, because rejecting on an assumption about the
+    candidate is exactly the failure mode the two-axis model exists to prevent.
+
+    Rules, in order:
+
+    - a posting that requires citizenship in one country, against a candidate
+      whose authorization names only other countries -> conflict;
+    - a posting that requires work authorization in a named country, against a
+      candidate authorized only elsewhere -> conflict;
+    - a posting restricted to named countries that none of the candidate's
+      stated locations falls inside -> conflict.
+
+    Everything else is ``None`` and means *unknown*, never failure:
+
+    - the candidate states no authorization or no location;
+    - the posting states no restriction at all;
+    - the posting says only "remote" (which is never a geographic claim);
+    - the posting is worldwide, or states a timezone rather than a place.
+    """
+    profile = assess(job)
+
+    # A worldwide or timezone-only posting cannot conflict geographically.
+    if profile.scope in (LocationScope.WORLDWIDE, LocationScope.TIMEZONE_RESTRICTED):
+        return None
+
+    posting_countries = set(profile.countries)
+
+    # --- citizenship / work authorization ---
+    if profile.work_authorization in (
+        WorkAuthorization.CITIZENSHIP_REQUIRED,
+        WorkAuthorization.WORK_AUTHORIZATION_REQUIRED,
+    ):
+        if not candidate_authorization or not posting_countries:
+            return None  # candidate side unknown -> unknown, not failure
+        candidate_countries, _ = _named_places(candidate_authorization)
+        if candidate_countries and not (set(candidate_countries) & posting_countries):
+            return (
+                f"posting requires authorization in {'/'.join(sorted(posting_countries))}"
+                f" but candidate states {', '.join(candidate_countries)}"
+            )
+
+    # --- geographic restriction ---
+    if posting_countries and candidate_locations:
+        wanted = [loc.strip().lower() for loc in candidate_locations if loc and loc.strip()]
+        # Compare spellings, not ISO codes: the candidate states "germany" while
+        # the posting resolves to "DE".
+        posting_spellings = tuple(
+            name for code in sorted(posting_countries)
+            for name in _NAMES_BY_CODE.get(code, ())
+        )
+        if wanted and posting_spellings and not any(
+            any(name in loc for name in posting_spellings) for loc in wanted
+        ):
+            return (
+                f"posting restricted to {'/'.join(sorted(posting_countries))}"
+                f" but candidate states {', '.join(wanted)}"
+            )
+
+    return None
+
+
 __all__ = [
     "LocationScope",
     "WorkAuthorization",
     "EligibilityProfile",
     "assess",
     "timezone_constraint",
+    "hard_ineligibility_reason",
 ]

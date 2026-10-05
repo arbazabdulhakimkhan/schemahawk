@@ -486,3 +486,76 @@ def test_technical_is_unknown_when_job_lists_no_skills():
 def test_technical_is_unknown_when_profile_declares_no_skills():
     result = match_job(job(description="We use Python."), profile())
     assert result.technical_score is None
+# --- P0: requirement silence must not score (Phase 2C) --------------------
+# Before this, a posting that states nothing left exactly one knowable
+# component, and renormalizing over that single component returned a perfect
+# 100. Silence is not a match.
+
+
+def test_absent_experience_requirement_is_unknown_not_satisfied():
+    """Candidate declares years; posting asks for none. That is not evidence."""
+    result = match_job(
+        job(title="Data Engineer", description="Great team."),
+        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+    )
+    assert result.experience_match == UNKNOWN
+    assert "job states no years requirement" in " ".join(result.explanation)
+
+
+def test_explicit_experience_requirement_met_scores_full():
+    result = match_job(
+        job(description="We use SQL. Requires 5+ years of experience."),
+        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+    )
+    assert result.experience_match != UNKNOWN
+    assert result.experience_gap_years == 0.0
+    assert result.experience_score == 100
+
+
+def test_explicit_experience_requirement_failed_scores_zero():
+    result = match_job(
+        job(description="We use SQL. Requires 12+ years of experience."),
+        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+    )
+    assert result.experience_gap_years == 5.0
+    assert result.experience_score == 0
+
+
+def test_single_known_component_yields_no_overall_score():
+    """Only technical is knowable; the total must not masquerade as a verdict."""
+    result = match_job(
+        job(title="Engineer", description="You will use SQL daily."),
+        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+    )
+    assert result.technical_score == 100
+    assert result.overall_score is None
+
+
+def test_two_known_components_do_emit_an_overall_score():
+    result = match_job(
+        job(title="Senior Engineer", description="You will use SQL daily."),
+        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+    )
+    assert result.technical_score == 100
+    assert result.experience_score == 100
+    assert result.overall_score == 100
+
+
+def test_totally_silent_posting_has_no_overall_score():
+    result = match_job(
+        job(title="Data Engineer", description="Great team."),
+        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+    )
+    assert result.overall_score is None
+    assert result.is_fully_unknown
+
+
+def test_matching_never_changes_the_v1_relevance_score():
+    from schemahawk.relevance import score_relevance
+
+    subject = job(description="We use SQL, Python and Airflow.")
+    subject_profile = profile(total_years_experience=7, seniority="senior",
+                              skills=["SQL", "Python"])
+    before = score_relevance(subject)
+    match_job(subject, subject_profile)
+    assert score_relevance(subject) == before

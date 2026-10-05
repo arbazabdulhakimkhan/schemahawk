@@ -96,6 +96,11 @@ class Settings:
     # --- storage / filtering policy ---
     db_path: str = "data/schemahawk.db"
     reject_restricted: bool = True
+    # When true, a job whose *stated* eligibility restriction provably conflicts
+    # with the *stated* candidate profile is rejected outright instead of merely
+    # losing points. A candidate who has not declared authorization or location
+    # is never rejected: unknown stays unknown.
+    hard_reject_ineligible: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -124,6 +129,9 @@ class Settings:
             db_path=os.getenv("SCHEMAHAWK_DB", "data/schemahawk.db"),
             reject_restricted=os.getenv("REJECT_RESTRICTED", "true").strip().lower()
             not in ("0", "false", "no"),
+            hard_reject_ineligible=os.getenv(
+                "HARD_REJECT_INELIGIBLE", "true"
+            ).strip().lower() not in ("0", "false", "no"),
         )
 
     def summary(self) -> dict[str, str]:
