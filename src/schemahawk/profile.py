@@ -316,13 +316,31 @@ def parse_profile(data: Any, *, source: str = SOURCE_FILE,
 
 def load_profile(path: str | Path | None = None, *,
                  source: str = SOURCE_FILE) -> CandidateProfile:
-    """Read and validate a YAML profile from ``path``.
+    """Read and validate a YAML profile from an **explicitly given** ``path``.
 
     Uses ``yaml.safe_load``: a profile file can never instantiate arbitrary
     Python objects. Raises :class:`ProfileError` with a precise message on
     malformed or missing input.
+
+    ``path`` must be explicit. It used to default to ``DEFAULT_PROFILE_PATH``,
+    which made ``load_profile()`` resolve to the operator's private
+    ``config/profile.yaml`` on a developer machine while raising ``ProfileError``
+    in CI where that file is (correctly) absent - the same call behaving
+    differently in two places. The three profile concepts now have one
+    unambiguous entry point each:
+
+    - this function, for a path the caller names;
+    - :func:`load_private_profile`, for the operator's default local file;
+    - :func:`default_profile`, for a guaranteed-empty profile.
     """
-    target = Path(path) if path is not None else DEFAULT_PROFILE_PATH
+    if path is None:
+        raise ProfileError(
+            "load_profile() requires an explicit path. Use "
+            "load_private_profile() for the default local profile.yaml, "
+            "load_profile_or_default() to fall back to an empty profile, "
+            "or default_profile() for a guaranteed-empty profile."
+        )
+    target = Path(path)
     if not target.exists():
         raise ProfileError(f"no profile file at {target}")
     if target.is_dir():
@@ -369,6 +387,18 @@ def load_profile_or_default(path: str | Path | None = None) -> CandidateProfile:
     return load_profile(target)
 
 
+def load_private_profile(
+    path: str | Path | None = None,
+) -> CandidateProfile:
+    """The operator's default local profile, or an empty profile if absent.
+
+    This is the only function that resolves :data:`DEFAULT_PROFILE_PATH` on its
+    own. Naming it makes "use my real profile" an explicit decision at the call
+    site, so a test or analysis script cannot pick up personal data by accident.
+    """
+    return load_profile_or_default(path)
+
+
 def profile_from_settings(settings) -> CandidateProfile:
     """Resolve the profile through ``Settings.candidate_profile_path``."""
     return load_profile_or_default(getattr(settings, "candidate_profile_path", None))
@@ -384,6 +414,7 @@ __all__ = [
     "Skill",
     "default_profile",
     "example_profile",
+    "load_private_profile",
     "load_profile",
     "load_profile_or_default",
     "parse_profile",

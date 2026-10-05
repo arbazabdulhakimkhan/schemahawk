@@ -53,9 +53,13 @@ NOT_APPLICABLE = "N/A"
 
 # --- deterministic extraction patterns --------------------------------------
 # "5+ years", "3-5 years", "at least 7 years of experience"
+# Two groups: the leading number and an optional range upper bound. The range
+# must be captured - with a non-capturing range this returned the *lower* bound
+# of "3-5 years" even though the docstring promises the maximum, quietly
+# understating every ranged requirement.
 _YEARS = re.compile(
     r"\b(?:at\s+least\s+|minimum\s+|min\.?\s*)?(\d{1,2})\s*(?:\+|plus)?\s*"
-    r"(?:(?:-|to|\u2013)\s*\d{1,2}\s*)?(?:years?|yrs?)\b",
+    r"(?:(?:-|to|\u2013)\s*(\d{1,2})\s*)?(?:years?|yrs?)\b",
     re.I,
 )
 _REQUIRED_HINT = re.compile(
@@ -285,13 +289,23 @@ def _extract_years(text: str) -> float | None:
 
     Takes the maximum because a range like "3-5 years" is satisfied by the
     upper bound; using the maximum keeps the requirement honest (highest stated
-    demand) rather than optimistic.
+    demand) rather than optimistic. The maximum applies both across separate
+    mentions and across each range's own upper bound.
+
+    Zero is discarded: "0 years of experience required" states no requirement at
+    all, and returning ``0.0`` would read as a real, trivially-met demand and
+    hand out a perfect experience score. Figures that do not fit the pattern at
+    all - "100 years" - stay ``None`` rather than being guessed at, so an absurd
+    number never becomes a fabricated requirement.
     """
     years: list[float] = []
-    for raw in _YEARS.findall(text):
-        value = re.sub(r"[^\d]", "", raw)
-        if value:
-            years.append(float(value))
+    for leading, upper in _YEARS.findall(text):
+        for token in (leading, upper):
+            if not token:
+                continue
+            value = float(token)
+            if value > 0:
+                years.append(value)
     return max(years) if years else None
 
 

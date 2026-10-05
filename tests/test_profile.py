@@ -16,9 +16,11 @@ from schemahawk.profile import (
     PROFILE_VERSION,
     SOURCE_DEFAULT,
     SOURCE_EXAMPLE,
+    SOURCE_FILE,
     ProfileError,
     default_profile,
     example_profile,
+    load_private_profile,
     load_profile,
     load_profile_or_default,
     parse_profile,
@@ -319,3 +321,70 @@ def test_unknown_keys_are_preserved_not_rejected():
 
 def test_known_keys_do_not_leak_into_extras():
     assert parse_profile({"version": 1, "seniority": "senior"}).extras == {}
+# --- profile source disambiguation (Phase 2C hardening) -------------------
+# The three concepts must not be confusable:
+#   load_profile(path)      an explicitly requested file
+#   load_private_profile()  the operator's default local profile
+#   default_profile()       a guaranteed-empty profile
+# These previously overlapped: load_profile() with no argument silently read
+# config/profile.yaml on a developer machine and raised ProfileError in CI, so
+# the same call behaved differently in two places.
+
+
+def test_load_profile_without_a_path_raises_instead_of_guessing():
+    """No implicit fallback to DEFAULT_PROFILE_PATH."""
+    with pytest.raises(ProfileError) as excinfo:
+        load_profile()
+    message = str(excinfo.value)
+    assert "explicit path" in message
+    # the error must point at the alternatives rather than just failing
+    assert "load_private_profile" in message
+    assert "default_profile" in message
+
+
+def test_load_profile_with_explicit_path_still_works(tmp_path):
+    profile = load_profile(write(tmp_path, MINIMAL))
+    assert profile.source == SOURCE_FILE
+    assert profile.skills == ()
+
+
+def test_default_profile_is_empty_even_when_a_private_profile_exists():
+    """The anti-leak guard: a private file on disk must not reach a caller
+    that asked for an empty profile."""
+    empty = default_profile()
+    assert empty.source == SOURCE_DEFAULT
+    assert empty.skills == ()
+    assert empty.total_years_experience is None
+    assert empty.seniority is None
+    # this repository checkout does contain a private profile; assert the empty
+    # profile did not pick any of it up
+    private = load_private_profile()
+    if private.skills:
+        assert empty.skills != private.skills
+
+
+def test_default_profile_ignores_a_named_path(tmp_path):
+    assert default_profile().skills == ()
+    assert load_profile(write(tmp_path, MINIMAL)).skills == ()
+
+
+def test_load_private_profile_is_the_only_default_resolver(tmp_path):
+    """The settings-facing resolver is explicit about the private file."""
+    resolved = load_private_profile()
+    assert resolved.source in (SOURCE_FILE, SOURCE_DEFAULT)
+    # and it must never raise for a missing file
+    assert load_private_profile(tmp_path / "absent.yaml").source == SOURCE_DEFAULT
+
+
+def test_or_default_returns_empty_when_the_file_is_absent(tmp_path):
+    fallback = load_profile_or_default(tmp_path / "absent.yaml")
+    assert fallback.source == SOURCE_DEFAULT
+    assert fallback.skills == ()
+
+
+def test_profile_api_surface_exports_all_three_concepts():
+    from schemahawk.profile import __all__ as exported
+
+    assert "load_profile" in exported
+    assert "load_private_profile" in exported
+    assert "default_profile" in exported

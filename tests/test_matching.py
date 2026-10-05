@@ -559,3 +559,82 @@ def test_matching_never_changes_the_v1_relevance_score():
     before = score_relevance(subject)
     match_job(subject, subject_profile)
     assert score_relevance(subject) == before
+# --- year parsing (Phase 2C hardening) -----------------------------------
+# A range must resolve to its upper bound. The regex used to leave the range
+# non-capturing, so "3-5 years" returned 3 - the *lower* bound - even though
+# the docstring promised the maximum, quietly understating every ranged
+# requirement in the lenient direction.
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("5+ years of experience", 5.0),
+        ("at least 7 years", 7.0),
+        ("10+ years", 10.0),
+        ("1 year", 1.0),
+        ("3-5 years", 5.0),
+        ("3 to 5 years", 5.0),
+        ("2\u20134 years", 4.0),          # en dash
+        ("at least 3-5 years", 5.0),
+        ("0-5 years", 5.0),
+        ("3-5 years, 8+ years", 8.0),   # maximum across mentions
+        ("99 years", 99.0),
+    ],
+)
+def test_experience_requirements_parse_to_the_highest_stated_demand(text, expected):
+    assert extract_requirements(job(description=text), profile()).min_years_experience == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "0 years experience",
+        "0 years of experience required",
+        "100 years",                    # does not fit the pattern -> unknown
+        "no experience required",
+        "Great team, apply now.",
+    ],
+)
+def test_unrealistic_or_absent_experience_stays_unknown(text):
+    assert extract_requirements(job(description=text), profile()).min_years_experience is None
+
+
+def test_zero_years_requirement_does_not_award_a_perfect_experience_score():
+    """Regression: '0 years' parsed to 0.0, which is a trivially-met demand.
+
+    ``gap = max(0, 0 - years)`` is 0, so the component scored 100 for a posting
+    that required nothing - the same silence-inflation class as the P0 fix.
+    """
+    result = match_job(
+        job(description="We use SQL. 0 years experience required."),
+        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+    )
+    assert result.experience_gap_years is None
+    assert "job states no years requirement" in " ".join(result.explanation)
+
+
+def test_ranged_requirement_reports_the_upper_bound_as_the_gap():
+    result = match_job(
+        job(description="We use SQL. 3-5 years of experience required."),
+        profile(total_years_experience=7, seniority="senior", skills=["SQL"]),
+    )
+    assert result.experience_gap_years == 0.0
+    assert result.experience_score == 100
+
+
+def test_ranged_requirement_is_stricter_than_the_lower_bound():
+    """A 3-4 year candidate does not satisfy '3-5 years'; the gap is 1."""
+    result = match_job(
+        job(description="We use SQL. 3-5 years of experience required."),
+        profile(total_years_experience=4, seniority="senior", skills=["SQL"]),
+    )
+    assert result.experience_gap_years == 1.0
+    assert result.experience_score == 80
+
+
+def test_absurd_year_count_is_never_fabricated_into_a_requirement():
+    assert extract_requirements(
+        job(description="We need 100 years of experience."),
+        profile(),
+    ).min_years_experience is None
