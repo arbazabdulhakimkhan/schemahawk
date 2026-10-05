@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .models import FreshnessStatus, Job
+from .enrichment import AcquisitionReport
 from .routes import ApplicationRouteInfo
 from .matching import UNKNOWN, MatchResult
 
@@ -103,6 +104,8 @@ class RunReport:
     #: Parallel to ``matches`` - the classified application route per job.
     #: Report-only in Phase 3A: no column, because the taxonomy may still change.
     routes: list[tuple[Job, ApplicationRouteInfo]] = field(default_factory=list)
+    #: Phase 3B acquisition summary. Report-only; no column was added.
+    acquisition: AcquisitionReport | None = None
 
     stored_inserted: int = 0
     stored_updated: int = 0
@@ -185,6 +188,22 @@ class RunReport:
             lines += ["", "Overall candidate match:"]
             for job, match in self.matches:
                 lines += _render_match(job, match)
+
+        if self.acquisition is not None:
+            lines += ["", "Route acquisition:"]
+            lines.append(f"  status: {self.acquisition.status}")
+            if self.acquisition.status == "ok":
+                lines.append(
+                    f"  boards_examined: {self.acquisition.boards_examined} "
+                    f"| listings: {self.acquisition.listings_seen} "
+                    f"| enriched: {self.acquisition.enriched} "
+                    f"| ambiguous_matches: {self.acquisition.ambiguous_matches} "
+                    f"| no_match: {self.acquisition.no_match} "
+                    f"| weaker_route_rejected: {self.acquisition.weaker_route_rejected}")
+                for subject, detail in self.acquisition.evidence[:20]:
+                    lines.append(f"  - {subject}: {detail}")
+                for warning in self.acquisition.warnings[:10]:
+                    lines.append(f"  ! {warning}")
 
         if self.routes:
             lines += ["", "Application routes:"]

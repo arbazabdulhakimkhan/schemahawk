@@ -1,0 +1,36 @@
+{
+  "jobs": [
+    {
+      "id": 900001,
+      "title": "Senior Data Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/900001",
+      "location": {"name": "Remote - Europe"},
+      "first_published": "2026-09-28T10:00:00Z",
+      "content": "<p>Build batch and streaming pipelines on Databricks and Snowflake.</p>"
+    },
+    {
+      "id": 900002,
+      "title": "Analytics Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/900002",
+      "location": {"name": "Berlin, Germany"},
+      "first_published": "2026-09-29T10:00:00Z",
+      "content": "<p>dbt models and Snowflake warehouses.</p>"
+    },
+    {
+      "id": 900003,
+      "title": "Senior Data Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/900003",
+      "location": {"name": "Remote - Americas"},
+      "first_published": "2026-09-30T10:00:00Z",
+      "content": "<p>Same title in a second location, to exercise ambiguity.</p>"
+    },
+    {
+      "id": 900004,
+      "title": "Marketing Manager",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/900004",
+      "location": {"name": "Remote"},
+      "first_published": "2026-10-01T10:00:00Z",
+      "content": "<p>Not a data role.</p>"
+    }
+  ]
+}

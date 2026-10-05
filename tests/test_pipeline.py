@@ -342,3 +342,68 @@ def test_route_stage_never_invents_a_contact(settings):
     report, _ = _run(replace(settings, db_path=None), jobs, profile=default_profile())
     for _job, route in report.routes:
         assert "@" not in (route.url or "")
+
+
+# --- Phase 3B: route acquisition -----------------------------------------
+
+
+def test_pipeline_reports_acquisition_skipped_without_boards(settings):
+    """With no trusted boards configured the stage is a no-op, not a failure."""
+    jobs = [make_job(url="https://e.com/m12", source_job_id="m12",
+                     minutes_old=5, description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None, greenhouse_boards=(),
+                             lever_boards=()), jobs, profile=default_profile())
+    assert report.acquisition is not None
+    assert report.acquisition.status == "skipped (no configured boards)"
+    assert report.acquisition.enriched == 0
+    assert "Route acquisition:" in report.render()
+
+
+def test_pipeline_acquisition_runs_before_classification(settings, monkeypatch):
+    """Routes are classified after acquisition has had its chance to attach."""
+    from schemahawk.sources.company_boards import CompanyBoardsSource
+    order = []
+
+    def listings(self):
+        order.append("acquire")
+        return [], []
+    monkeypatch.setattr(CompanyBoardsSource, "board_listings", listings)
+
+    from schemahawk.routes import classify_route as original
+
+    def spy(job):
+        order.append("classify")
+        return original(job)
+    monkeypatch.setattr("schemahawk.pipeline.classify_route", spy)
+
+    jobs = [make_job(url="https://e.com/m13", source_job_id="m13",
+                     minutes_old=5, description=MATCH_JD)]
+    _run(replace(settings, db_path=None, greenhouse_boards=("acme",),
+                 lever_boards=()), jobs, profile=default_profile())
+    assert order[0] == "acquire"
+    assert "classify" in order
+
+
+def test_pipeline_acquisition_never_blocks_a_run(settings, monkeypatch):
+    """A broken board must not fail the pipeline."""
+    from schemahawk.sources.company_boards import CompanyBoardsSource
+
+    def boom(self):
+        raise RuntimeError("board API exploded")
+    monkeypatch.setattr(CompanyBoardsSource, "board_listings", boom)
+
+    jobs = [make_job(url="https://e.com/m14", source_job_id="m14",
+                     minutes_old=5, description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None, greenhouse_boards=("acme",),
+                             lever_boards=()), jobs, profile=default_profile())
+    assert "failed" in report.acquisition.status
+    assert report.strong_candidates >= 0
+
+
+def test_pipeline_acquisition_does_not_mutate_relevance(settings, monkeypatch):
+    jobs = [make_job(url="https://e.com/m15", source_job_id="m15",
+                     minutes_old=5, description=MATCH_JD)]
+    report, _ = _run(replace(settings, db_path=None, greenhouse_boards=(),
+                             lever_boards=()), jobs, profile=default_profile())
+    for job, _route in report.routes:
+        assert job.relevance_score is not None

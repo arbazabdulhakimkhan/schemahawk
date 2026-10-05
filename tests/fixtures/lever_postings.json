@@ -1,0 +1,18 @@
+[
+  {
+    "id": "770001",
+    "text": "Freelance Data Engineer",
+    "applyUrl": "https://jobs.lever.co/globex/770001-freelance-data-engineer",
+    "createdAt": 1768474800000,
+    "categories": {"location": "Remote", "commitment": "Freelance"},
+    "descriptionPlain": "Contract ETL work, six months."
+  },
+  {
+    "id": "770002",
+    "text": "Lead Analytics Engineer",
+    "applyUrl": "https://jobs.lever.co/globex/770002-lead-analytics-engineer",
+    "createdAt": 1768474800000,
+    "categories": {"location": "Amsterdam", "commitment": "Full-time"},
+    "descriptionPlain": "Own the warehouse roadmap."
+  }
+]

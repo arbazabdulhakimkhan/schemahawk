@@ -30,7 +30,8 @@ from .models import (
     QualityStatus,
 )
 from .matching import match_job
-from .routes import ApplicationRoute, classify_route
+from .enrichment import enrich_jobs
+from .routes import classify_route
 from .normalize import attach_keys, clean_text
 from .profile import CandidateProfile, profile_from_settings
 from .quality import classify
@@ -172,9 +173,11 @@ def _discover(settings, report, store, *, now, only_source, force, since_minutes
         for job in strong
     ]
 
-    # Application-route classification (Phase 3A). Pure classification: the
-    # pipeline ends at MATCHED -> route found / NO_ROUTE. Nothing here fetches
-    # a URL, sends mail, or submits anything.
+    # Application-route acquisition (Phase 3B). Attaches publicly discoverable
+    # application URLs for operator-configured company boards, then Phase 3A
+    # classifies whatever is there. No board configured means no network at all.
+    report.acquisition = enrich_jobs([job for job, _ in report.matches],
+                                     settings)
     report.routes = [(job, classify_route(job)) for job, _ in report.matches]
 
     report.stored_inserted, report.stored_updated = store.upsert_jobs(unique)
