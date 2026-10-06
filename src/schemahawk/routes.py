@@ -198,14 +198,17 @@ def is_social(url: str) -> bool:
 def is_ats(url: str) -> bool:
     """True when the URL sits on a known applicant-tracking vendor's domain.
 
-    Host-based only, deliberately. An earlier version also matched path
-    fragments like "/jobs/", which mislabelled every job board as an ATS -
-    ``jobicy.com/jobs/154514-...`` became EXTERNAL_APPLICATION. A path is not
-    evidence of vendor provenance; only the host is.
+    Host-based only, and deliberately so. An earlier version also matched path
+    fragments, which mislabelled every job board as an ATS
+    (``jobicy.com/jobs/154514-...``); a later one matched a ``/detail/<id>``
+    shape, which would classify *any* domain with that path as an ATS. URL
+    shape can never establish provenance. Custom-domain boards such as
+    ``careers.datadoghq.com`` are handled instead by the caller asserting
+    ``board_provenance``, because there the trust comes from the board the
+    operator configured, not from the path.
     """
     host = _normalise_host(url)
     return any(h in host for h in _ATS_HOSTS)
-
 
 def has_application_path(url: str) -> bool:
     """True when the path looks like a specific posting rather than a hub.
@@ -353,7 +356,8 @@ def _route(route_type, url, source, confidence, is_official, *, evidence,
     )
 
 
-def _from_url(url: str, job: Job, *, source: str | None) -> ApplicationRouteInfo | None:
+def _from_url(url: str, job: Job, *, source: str | None,
+                board_provenance: bool = False) -> ApplicationRouteInfo | None:
     """Classify one candidate URL. ``None`` when it is not usable at all."""
     if not is_http_url(url):
         return None
@@ -398,12 +402,21 @@ evidence=f"freelance marketplace host {host}")
                       evidence=f"official host {host}, but the path is neither "
                                f"an application nor a careers page{suffix}")
 
-    if source in _ATS_SOURCE_NAMES and is_ats(clean):
-        # The operator configured this board, so the URL is trustworthy, but
-        # the company does not own the domain.
+    if source in _ATS_SOURCE_NAMES or board_provenance:
+        # Trusted provenance: this URL came from a board the operator
+        # explicitly configured, whose vendor endpoint self-identifies the
+        # company. That is strictly stronger evidence than any URL shape, and
+        # it is what makes a custom-domain board such as
+        # ``careers.datadoghq.com/detail/8144607`` recognisable without
+        # guessing that ``datadoghq`` means ``Datadog``.
+        #
+        # It is still EXTERNAL_APPLICATION and never OFFICIAL_APPLICATION:
+        # we know the board is legitimate, but nothing here ties the host to
+        # the company, so company ownership is not claimed.
         return _route(ApplicationRoute.EXTERNAL_APPLICATION, clean, source,
                       RouteConfidence.HIGH, is_official=False,
-                      evidence="operator-configured ATS board")
+                      evidence="application URL from an operator-configured "
+                               "board, verified by the ATS vendor endpoint")
 
     if is_ats(clean):
         return _route(ApplicationRoute.EXTERNAL_APPLICATION, clean, source,
@@ -420,13 +433,23 @@ evidence=f"freelance marketplace host {host}")
                   evidence=f"host {host} is a job board posting page")
 
 
-def classify_route(job: Job) -> ApplicationRouteInfo:
+def classify_route(job: Job, *,
+                  board_provenance: bool = False) -> ApplicationRouteInfo:
     """Classify the best available application route for ``job``.
 
     Official-first policy: an official company endpoint always outranks a
     careers page, which outranks a marketplace, which outranks an external
     ATS, which outranks a board posting. Nothing is invented - when no route
     can be established the result is ``UNKNOWN`` with the reason recorded.
+
+    ``board_provenance`` asserts that ``job.application_url`` was supplied by a
+    board the operator explicitly configured, whose vendor endpoint
+    self-identifies the owning company. It applies to ``application_url``
+    only - never to ``job.url``, which is a posting page of unknown origin. It is an *input*, deliberately not a
+    property of the result: ``ApplicationRouteInfo`` stays unchanged, and the
+    caller must say where the URL came from rather than letting the classifier
+    guess from the URL. Defaults to ``False`` so every existing caller keeps
+    the URL-only behaviour.
     """
     candidates: list[ApplicationRouteInfo] = []
 
@@ -442,7 +465,8 @@ def classify_route(job: Job) -> ApplicationRouteInfo:
 
     # 2. The source's own application field, when it supplied one.
     if job.application_url and is_http_url(job.application_url):
-        classified = _from_url(job.application_url, job, source=job.source)
+        classified = _from_url(job.application_url, job, source=job.source,
+                                board_provenance=board_provenance)
         if classified is not None:
             candidates.append(classified)
 

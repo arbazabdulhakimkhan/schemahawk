@@ -371,9 +371,9 @@ def test_pipeline_acquisition_runs_before_classification(settings, monkeypatch):
 
     from schemahawk.routes import classify_route as original
 
-    def spy(job):
+    def spy(job, **kwargs):
         order.append("classify")
-        return original(job)
+        return original(job, **kwargs)
     monkeypatch.setattr("schemahawk.pipeline.classify_route", spy)
 
     jobs = [make_job(url="https://e.com/m13", source_job_id="m13",

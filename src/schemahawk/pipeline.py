@@ -178,7 +178,17 @@ def _discover(settings, report, store, *, now, only_source, force, since_minutes
     # classifies whatever is there. No board configured means no network at all.
     report.acquisition = enrich_jobs([job for job, _ in report.matches],
                                      settings)
-    report.routes = [(job, classify_route(job)) for job, _ in report.matches]
+    # Phase 3C: a URL that acquisition attached came from a board the operator
+    # configured and the vendor verified, so it is classified with that
+    # provenance rather than being judged on its shape alone. Everything else
+    # keeps the URL-only behaviour.
+    board_urls = report.acquisition.board_urls
+    report.routes = [
+        (job, classify_route(
+            job, board_provenance=bool(job.application_url
+                                       and job.application_url in board_urls)))
+        for job, _ in report.matches
+    ]
 
     report.stored_inserted, report.stored_updated = store.upsert_jobs(unique)
     report.completed_at = datetime.now(timezone.utc)

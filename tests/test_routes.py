@@ -342,3 +342,70 @@ def test_is_usable_requires_both_actionability_and_confidence():
     unknown = classify_route(job(url="https://acme.com/about", company="Acme"))
     assert unknown.directly_actionable is False
     assert unknown.is_usable is False
+
+
+
+
+# --- Phase 3C: custom-domain ATS boards need provenance, not path shape ----
+#
+# Datadog serves every Greenhouse posting from careers.datadoghq.com, which
+# carries no vendor hostname, so a host check alone called it a generic job
+# board. A first attempt fixed this with a "/detail/<id>" path signature, which
+# was wrong: https://untrusted-site.example/detail/123 would then have become
+# an ATS. URL shape cannot establish provenance, so trust is now asserted by
+# the caller from the board it configured.
+
+def test_url_shape_alone_never_establishes_an_ats():
+    """The specific false positive that motivated the redesign."""
+    for url in ("https://untrusted-site.example/detail/123",
+                "https://evil.example/jobs/456",
+                "https://random.example/detail/9/?gh_jid=9"):
+        assert is_ats(url) is False, url
+
+
+def test_custom_domain_board_needs_board_provenance():
+    """Same URL: trusted board -> EXTERNAL_APPLICATION, untrusted -> not."""
+    url = "https://careers.datadoghq.com/detail/8144607/?gh_jid=8144607"
+    # acquisition writes application_url; that is what provenance describes
+    posting = job(application_url=url, company="Datadog")
+
+    untrusted = classify_route(posting)
+    assert untrusted.route_type is not ApplicationRoute.EXTERNAL_APPLICATION
+    assert untrusted.route_type is ApplicationRoute.JOB_POSTING_ONLY
+
+    trusted = classify_route(posting, board_provenance=True)
+    assert trusted.route_type is ApplicationRoute.EXTERNAL_APPLICATION
+
+
+def test_board_provenance_is_high_confidence_but_never_official():
+    """We know the board is legitimate; we do not own the domain."""
+    result = classify_route(
+        job(application_url="https://careers.datadoghq.com/detail/8144607/",
+            company="Datadog"),
+        board_provenance=True)
+    assert result.confidence is RouteConfidence.HIGH
+    assert result.is_official is False
+    assert result.route_type is ApplicationRoute.EXTERNAL_APPLICATION
+
+
+def test_board_provenance_does_not_override_a_company_owned_route():
+    """OFFICIAL_APPLICATION still wins: provenance adds an external route,
+    it never demotes a stronger company-owned one."""
+    result = classify_route(
+        job(application_url="https://careers.acme.com/jobs/1", company="Acme"),
+        board_provenance=True)
+    assert result.route_type is ApplicationRoute.OFFICIAL_APPLICATION
+    assert result.is_official is True
+
+
+def test_board_provenance_does_not_invent_a_route():
+    """Without a usable URL there is still nothing to classify."""
+    result = classify_route(job(), board_provenance=True)
+    assert result.route_type is ApplicationRoute.UNKNOWN
+    assert result.url is None
+
+
+def test_default_is_url_only_behaviour():
+    """Existing callers are unaffected unless they opt in."""
+    assert classify_route(job(url="https://acme.com/about")).route_type is (
+        ApplicationRoute.UNKNOWN)

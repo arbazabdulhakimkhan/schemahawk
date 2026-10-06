@@ -43,6 +43,10 @@ class AcquisitionReport:
     ambiguous_matches: int = 0
     no_match: int = 0
     weaker_route_rejected: int = 0
+    #: Application URLs this stage attached from a configured board. The set
+    #: *is* the provenance record: a caller may treat a URL in here as
+    #: board-supplied when classifying. Kept in memory only - no column.
+    board_urls: set[str] = field(default_factory=set)
     evidence: list[tuple[str, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -67,7 +71,9 @@ def _would_improve(job: Job, candidate_url: str) -> bool:
     previous = job.application_url
     try:
         job.application_url = candidate_url
-        proposed = classify_route(job)
+        # The candidate came from a board the operator configured and the
+        # ATS vendor verified, so it carries provenance no URL shape can.
+        proposed = classify_route(job, board_provenance=True)
     finally:
         job.application_url = previous
     return _rank(proposed.route_type) < _rank(current.route_type)
@@ -138,6 +144,7 @@ def enrich_jobs(jobs: list[Job], settings) -> AcquisitionReport:
 
         job.application_url = listing.application_url
         report.enriched += 1
+        report.board_urls.add(listing.application_url)
         report.note(
             job.title or "(untitled)",
             f"acquired {listing.vendor} application URL for board "
